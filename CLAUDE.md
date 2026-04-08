@@ -20,10 +20,16 @@ uv run python bot.py
 
 ## Architecture
 
-- `bot.py` - Entry point, bot lifecycle, healthcheck
+- `bot.py` - Entry point, bot lifecycle, healthcheck, database init
 - `config.py` - All configuration from environment variables
+- `db.py` - SQLite schema and helpers (profiles table)
 - `cogs/` - Feature modules, one per domain:
   - `streams.py` - Voice channel stream announcements
+  - `profiles.py` - `/lance settings` user profiles (Embark ID, timezone)
+
+## Slash command structure
+
+Most user-facing commands live under the `/lance` group (`/lance settings`, future `/lance help`, etc.). The streams cog uses no slash commands -- it's purely event-driven.
 
 ## Required Discord Bot Permissions
 

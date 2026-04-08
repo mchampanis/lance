@@ -7,6 +7,14 @@ primary_region = 'ams'
 [processes]
   bot = "uv run --no-sync python bot.py"
 
+[env]
+  DB_PATH = '/data/lance.db'
+
+[mounts]
+  source = "lance_data"
+  destination = "/data"
+  processes = ["bot"]
+
 [[restart]]
   policy = "always"
   processes = ["bot"]

@@ -1,10 +1,12 @@
 import logging
 
 import aiohttp
+import aiosqlite
 import discord
 from discord.ext import commands, tasks
 
 import config
+import db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,13 +24,28 @@ class LanceBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        await self.load_extension("cogs.streams")
+        # Database
+        self.db = await aiosqlite.connect(config.DB_PATH)
+        self.db.row_factory = aiosqlite.Row
+        await db.init_db(self.db)
+        log.info("Database initialized at %s", config.DB_PATH)
 
+        # Cogs
+        await self.load_extension("cogs.streams")
+        await self.load_extension("cogs.profiles")
+
+        # Sync slash commands per guild (instant)
         for guild_id in config.GUILD_IDS:
             guild = discord.Object(id=guild_id)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
             log.info("Commands synced to guild %s", guild_id)
+
+    async def close(self):
+        if hasattr(self, "db"):
+            await self.db.close()
+            log.info("Database connection closed")
+        await super().close()
 
     async def on_ready(self):
         log.info("Logged in as %s (ID: %s)", self.user, self.user.id)
