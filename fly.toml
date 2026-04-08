@@ -1,0 +1,18 @@
+app = 'lance'
+primary_region = 'ams'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[processes]
+  bot = "uv run --no-sync python bot.py"
+
+[[restart]]
+  policy = "always"
+  processes = ["bot"]
+
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256
+  processes = ["bot"]

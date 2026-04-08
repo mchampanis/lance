@@ -1,0 +1,14 @@
+[project]
+name = "lance"
+version = "0.1.0"
+description = "Multi-purpose Discord bot for the First Wave Survivors community"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.5",
+    "python-dotenv>=1.0",
+    "aiohttp>=3.9",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
