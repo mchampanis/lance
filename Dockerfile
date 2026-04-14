@@ -8,6 +8,5 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY bot.py config.py db.py ./
 COPY cogs/ cogs/
-COPY assets/ assets/
 
 CMD ["uv", "run", "--no-sync", "python", "bot.py"]

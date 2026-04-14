@@ -1,0 +1,12 @@
+.git/
+.github/
+.env
+.env.*
+!.env.example
+*.db
+.venv/
+__pycache__/
+.memory/
+.claude/
+ONGOING.md
+tests/
