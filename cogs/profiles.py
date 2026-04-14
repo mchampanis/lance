@@ -204,7 +204,21 @@ class Profiles(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    lance = app_commands.Group(name="lance", description="Lance bot commands")
+    async def build_profile_embed(self, member: discord.Member) -> discord.Embed:
+        """Public profile embed, visible to anyone who looks up a user."""
+        profile = await db.get_profile(self.bot.db, member.id)
+        embark_id = profile["embark_id"] if profile and profile["embark_id"] else "*not set*"
+        timezone = profile["timezone"] if profile and profile["timezone"] else "*not set*"
+
+        embed = discord.Embed(
+            title=f"{member.display_name}'s profile",
+            color=member.accent_color or discord.Color.blurple(),
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="\N{VIDEO GAME} Embark ID", value=embark_id, inline=False)
+        embed.add_field(name="\N{CLOCK FACE THREE OCLOCK} Timezone", value=timezone, inline=False)
+        embed.set_footer(text=config.BOT_NAME)
+        return embed
 
     async def build_settings_embed(self, user: discord.abc.User) -> discord.Embed:
         profile = await db.get_profile(self.bot.db, user.id)
@@ -231,12 +245,71 @@ class Profiles(commands.Cog):
         embed.set_footer(text=f"{config.BOT_NAME} - settings are private to you")
         return embed
 
+async def setup(bot: commands.Bot):
+    from cogs import lance
+
+    cog = Profiles(bot)
+    await bot.add_cog(cog)
+
+    @lance.command(name="help", description="Show all Lance commands and features")
+    async def help_cmd(interaction: discord.Interaction):
+        embed = discord.Embed(
+            title=f"{config.BOT_NAME} -- Commands & Features",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="\N{VIDEO GAME} Profile",
+            value=(
+                "`/lance settings` -- Set your Embark ID and timezone\n"
+                "`/lance profile @user` -- View someone's profile\n"
+                "Right-click a user -> **Apps** -> **View Profile**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="\N{CLOCK FACE THREE OCLOCK} Time Conversion",
+            value=(
+                "React to any message with the clock emoji to get all "
+                "times converted to your timezone via DM.\n"
+                "-# Both you and the message author need a timezone set "
+                "in `/lance settings`."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="\N{PACKAGE} Giveaways",
+            value=(
+                "`/lance give Item One, Item Two` -- List items (comma-separated)\n"
+                "Use the **Give Item**, **Claim**, and **My Items** buttons on the board.\n"
+                "`/lance giveaway-setup` -- Post the board (admin only)"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="\N{TELEVISION} Stream Alerts",
+            value=(
+                "Start streaming in a voice channel and Lance will "
+                "automatically announce it. No commands needed."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text=config.BOT_NAME)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @lance.command(name="settings", description="View or change your Lance settings")
-    async def settings(self, interaction: discord.Interaction):
-        embed = await self.build_settings_embed(interaction.user)
-        view = SettingsView(self, interaction.user.id)
+    async def settings(interaction: discord.Interaction):
+        embed = await cog.build_settings_embed(interaction.user)
+        view = SettingsView(cog, interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+    @lance.command(name="profile", description="View someone's profile")
+    @app_commands.describe(user="The user to look up")
+    async def profile(interaction: discord.Interaction, user: discord.Member):
+        embed = await cog.build_profile_embed(user)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(Profiles(bot))
+    # Right-click context menu on a user
+    @bot.tree.context_menu(name="View Profile")
+    async def view_profile_ctx(interaction: discord.Interaction, member: discord.Member):
+        embed = await cog.build_profile_embed(member)
+        await interaction.response.send_message(embed=embed, ephemeral=True)

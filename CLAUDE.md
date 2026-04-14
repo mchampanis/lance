@@ -2,7 +2,7 @@
 
 ## Overview
 
-Lance is a Swiss army knife Discord bot for the First Wave Survivors community (Arc Raiders). It handles stream announcements, and will eventually handle knowledgebase notifications and timezone conversions.
+Lance is a Swiss army knife Discord bot for the First Wave Survivors community (Arc Raiders). It handles stream announcements, user profiles, timezone conversions, and a community giveaway board.
 
 ## Stack
 
@@ -22,14 +22,24 @@ uv run python bot.py
 
 - `bot.py` - Entry point, bot lifecycle, healthcheck, database init
 - `config.py` - All configuration from environment variables
-- `db.py` - SQLite schema and helpers (profiles table)
+- `db.py` - SQLite schema and helpers (profiles, giveaway items/claims/board)
 - `cogs/` - Feature modules, one per domain:
   - `streams.py` - Voice channel stream announcements
   - `profiles.py` - `/lance settings` user profiles (Embark ID, timezone)
+  - `timeconvert.py` - Clock emoji reaction -> DM with times converted to your timezone
+  - `giveaways.py` - Community item giveaway board with claim/accept/decline workflow
 
 ## Slash command structure
 
-Most user-facing commands live under the `/lance` group (`/lance settings`, future `/lance help`, etc.). The streams cog uses no slash commands -- it's purely event-driven.
+All user-facing commands live under the `/lance` group, defined in `cogs/__init__.py` and shared across cogs:
+- `/lance help` (profiles cog)
+- `/lance settings` (profiles cog)
+- `/lance profile @user` (profiles cog)
+- `/lance give` (giveaways cog)
+- `/lance giveaway-setup` (giveaways cog, admin only)
+- **View Profile** context menu (right-click a user -> Apps; profiles cog)
+
+The streams and timeconvert cogs are purely event-driven (no slash commands).
 
 ## Required Discord Bot Permissions
 
@@ -42,6 +52,7 @@ Most user-facing commands live under the `/lance` group (`/lance settings`, futu
 
 - Members (privileged; for member cache population)
 - Presences (privileged; enabled but may not be needed -- see Notes)
+- Message Content (privileged; for reading message text in time conversion reactions)
 - Voice States (for `on_voice_state_update` and `self_stream`; included in `Intents.default()`)
 
 ## Notes

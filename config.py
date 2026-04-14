@@ -23,5 +23,11 @@ TIMEZONE_HELPER_URL = os.environ.get(
     "https://guides.firstwavesurvivors.com/tools/timezone",
 )
 
+# Time conversion reaction trigger emoji (Unicode name or custom emoji string)
+TIME_REACT_EMOJI = os.environ.get("TIME_REACT_EMOJI", "\N{CLOCK FACE THREE OCLOCK}")
+
+# Giveaways
+GIVEAWAY_EXPIRY_HOURS = int(os.environ.get("GIVEAWAY_EXPIRY_HOURS", "72"))
+
 # Healthchecks.io ping URL (optional)
 HEALTHCHECK_URL = os.environ.get("HEALTHCHECK_URL")

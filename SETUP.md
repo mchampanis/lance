@@ -7,15 +7,16 @@
 3. Go to **Bot** in the left sidebar
 4. Click **Reset Token** and copy the token -- this is your `BOT_TOKEN`
 5. Under **Privileged Gateway Intents**, enable:
-   - **Presence Intent** (required for stream detection)
+   - **Presence Intent** (enabled; may be droppable -- see CLAUDE.md notes)
    - **Server Members Intent** (required for member lookup)
+   - **Message Content Intent** (required for reading message text in time conversion)
 
 ## 2. Invite the Bot to Your Server
 
-Use this OAuth2 URL, replacing `CLIENT_ID` with your application's client ID (found on the **General Information** page):
+Use this OAuth2 URL, replacing `APPLICATION_ID` with your Application ID (found on the **General Information** page):
 
 ```
-https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot&permissions=83969
+https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot&permissions=83969
 ```
 
 This grants the bot these permissions:

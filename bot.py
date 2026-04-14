@@ -17,6 +17,7 @@ log = logging.getLogger("lance")
 intents = discord.Intents.default()
 intents.members = True
 intents.presences = True
+intents.message_content = True
 
 
 class LanceBot(commands.Bot):
@@ -30,9 +31,16 @@ class LanceBot(commands.Bot):
         await db.init_db(self.db)
         log.info("Database initialized at %s", config.DB_PATH)
 
-        # Cogs
+        # Cogs (order matters: profiles and giveaways add commands to the
+        # shared /lance group, which must be registered before syncing)
         await self.load_extension("cogs.streams")
         await self.load_extension("cogs.profiles")
+        await self.load_extension("cogs.timeconvert")
+        await self.load_extension("cogs.giveaways")
+
+        # Register the shared /lance command group
+        from cogs import lance
+        self.tree.add_command(lance)
 
         # Sync slash commands per guild (instant)
         for guild_id in config.GUILD_IDS:
