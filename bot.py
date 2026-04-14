@@ -37,6 +37,7 @@ class LanceBot(commands.Bot):
         await self.load_extension("cogs.profiles")
         await self.load_extension("cogs.timeconvert")
         await self.load_extension("cogs.giveaways")
+        await self.load_extension("cogs.countdowns")
 
         # Register the shared /lance command group
         from cogs import lance

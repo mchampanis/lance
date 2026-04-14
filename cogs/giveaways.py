@@ -7,12 +7,14 @@ commands.
 Lifecycle of an item:
   1. User posts via Give button or /lance give
   2. Item appears on the board as "available"
-  3. Another user clicks Claim -> lister gets a DM with Accept/Decline
-  4. Accept -> quantity decremented (gone if 0), claimer notified
-  5. Decline -> claimer notified, item stays available
-  6. Lister can Mark Gone at any time
-  7. Items auto-expire after GIVEAWAY_EXPIRY_HOURS (default 72)
-  8. Gone items purged from DB after 7 days
+  3. Another user clicks Claim -> joins a queue (ordered by time)
+  4. First in queue is presented to the lister via DM (Accept/Decline)
+  5. Accept -> quantity decremented, next in queue presented (or all
+     notified if item is gone)
+  6. Decline -> claimer notified, next in queue presented
+  7. Lister can Mark Gone at any time (remaining queue notified)
+  8. Items auto-expire after GIVEAWAY_EXPIRY_HOURS (default 120)
+  9. Gone items purged from DB after 7 days
 """
 
 import logging
@@ -81,10 +83,10 @@ async def build_board_embed(bot: commands.Bot, guild: discord.Guild) -> discord.
                 claimer_name = claimer.mention if claimer else f"<@{claim['claimer_id']}>"
                 line += f"\n> Promised to {claimer_name}"
 
-            # Show pending claim count
+            # Show queue size
             pending = await db.get_pending_claims_for_item(bot.db, item["id"])
             if pending:
-                line += f"\n> {len(pending)} pending claim{'s' if len(pending) != 1 else ''}"
+                line += f"\n> {len(pending)} in queue"
 
             lines.append(line)
 
@@ -117,6 +119,117 @@ async def refresh_board(bot: commands.Bot, guild: discord.Guild) -> None:
         await db.set_giveaway_board(bot.db, guild.id, channel.id, msg.id)
     except discord.HTTPException:
         log.warning("Failed to refresh giveaway board in guild %s", guild.id)
+
+
+async def _send_next_claim_dm(bot: commands.Bot, item, guild: discord.Guild) -> None:
+    """DM the item lister about the next pending claim in the queue, if any."""
+    pending = await db.get_pending_claims_for_item(bot.db, item["id"])
+    if not pending:
+        return
+
+    next_claim = pending[0]
+
+    lister = await _resolve_member(guild, item["user_id"])
+    if lister is None:
+        return
+
+    claimer = await _resolve_member(guild, next_claim["claimer_id"])
+
+    claimer_name = claimer.display_name if claimer else f"User {next_claim['claimer_id']}"
+
+    embed = discord.Embed(
+        title="Next in queue for your item!",
+        description=(
+            f"**{claimer_name}** wants your **{item['item_name']}**"
+        ),
+        color=discord.Color.gold(),
+    )
+    if claimer:
+        embed.set_thumbnail(url=claimer.display_avatar.url)
+
+    queue_remaining = len(pending) - 1
+    footer = config.BOT_NAME
+    if queue_remaining > 0:
+        footer += f" -- {queue_remaining} more in queue"
+    embed.set_footer(text=footer)
+
+    view = ClaimResponseView(next_claim["id"])
+    try:
+        await lister.send(embed=embed, view=view)
+    except discord.Forbidden:
+        log.warning("Cannot DM user %s for claim %s", lister.id, next_claim["id"])
+
+
+async def _resolve_member(
+    guild: discord.Guild, user_id: int,
+) -> discord.Member | None:
+    """Try cache first, fall back to API fetch."""
+    member = guild.get_member(user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(user_id)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    return member
+
+
+async def _check_milestone_roles(
+    bot: commands.Bot, guild: discord.Guild, user_id: int, new_total: int,
+) -> None:
+    """Award the correct milestone role and remove any lower ones."""
+    if not config.GIVEAWAY_MILESTONES:
+        return
+
+    earned_role_name = None
+    lower_role_names = []
+    for threshold, role_name in config.GIVEAWAY_MILESTONES:
+        if new_total >= threshold:
+            # Everything below the current earned tier is a lower role
+            if earned_role_name is not None:
+                lower_role_names.append(earned_role_name)
+            earned_role_name = role_name
+        else:
+            break
+
+    if earned_role_name is None:
+        return
+
+    member = await _resolve_member(guild, user_id)
+    if member is None:
+        return
+
+    # Build a lookup of guild roles by name
+    guild_roles = {r.name: r for r in guild.roles}
+
+    # Award the earned role
+    earned_role = guild_roles.get(earned_role_name)
+    if earned_role and earned_role not in member.roles:
+        try:
+            await member.add_roles(earned_role, reason=f"Giveaway milestone: {new_total} items given")
+            log.info("Awarded %s to %s (%d items given)", earned_role_name, member, new_total)
+        except discord.Forbidden:
+            log.warning("Missing permissions to assign role %s", earned_role_name)
+
+    # Remove lower milestone roles
+    for name in lower_role_names:
+        role = guild_roles.get(name)
+        if role and role in member.roles:
+            try:
+                await member.remove_roles(role, reason=f"Superseded by {earned_role_name}")
+            except discord.Forbidden:
+                pass
+
+
+async def _complete_handoff(
+    bot: commands.Bot, claim, item, guild: discord.Guild,
+) -> None:
+    """Called when both giver and taker confirm. Increments stats and checks milestones."""
+    new_total = await db.increment_items_given(bot.db, guild.id, item["user_id"])
+    await _check_milestone_roles(bot, guild, item["user_id"], new_total)
+    log.info(
+        "Handoff complete: item %d, claim %d, giver %d now at %d total",
+        item["id"], claim["id"], item["user_id"], new_total,
+    )
 
 
 # -- Modals -------------------------------------------------------------------
@@ -299,10 +412,11 @@ class MyItemsButton(
 
             pending = await db.get_pending_claims_for_item(cog.bot.db, item["id"])
             if pending:
-                for claim in pending:
+                for i, claim in enumerate(pending, 1):
                     claimer = interaction.guild.get_member(claim["claimer_id"])
                     name = claimer.display_name if claimer else f"User {claim['claimer_id']}"
-                    line += f"\n> Pending: {name}"
+                    label = "Next up" if i == 1 else f"#{i} in queue"
+                    line += f"\n> {label}: {name}"
 
             accepted = await db.get_accepted_claims_for_item(cog.bot.db, item["id"])
             for claim in accepted:
@@ -359,39 +473,46 @@ class ClaimSelectView(discord.ui.View):
             )
             return
 
+        # Check existing queue before creating the claim
+        existing_pending = await db.get_pending_claims_for_item(self.cog.bot.db, item_id)
         claim = await db.create_claim(self.cog.bot.db, item_id, interaction.user.id)
 
-        await interaction.response.edit_message(
-            content=f"Claim submitted for **{item['item_name']}**! The owner has been notified.",
-            view=None,
-        )
-
-        # DM the lister
         guild = interaction.guild
-        lister = guild.get_member(item["user_id"]) if guild else None
-        if lister is None and guild is not None:
-            try:
-                lister = await guild.fetch_member(item["user_id"])
-            except (discord.Forbidden, discord.HTTPException):
-                lister = None
-
-        if lister is not None:
-            embed = discord.Embed(
-                title="Someone wants your item!",
-                description=(
-                    f"**{interaction.user.display_name}** wants your "
-                    f"**{item['item_name']}**"
+        if existing_pending:
+            # Someone is already first in queue -- just join behind them
+            position = len(existing_pending) + 1
+            await interaction.response.edit_message(
+                content=(
+                    f"You're **#{position}** in the queue for **{item['item_name']}**. "
+                    f"You'll be notified when it's your turn."
                 ),
-                color=discord.Color.gold(),
+                view=None,
             )
-            embed.set_thumbnail(url=interaction.user.display_avatar.url)
-            embed.set_footer(text=config.BOT_NAME)
+        else:
+            # First in queue -- DM the lister
+            await interaction.response.edit_message(
+                content=f"Claim submitted for **{item['item_name']}**! The owner has been notified.",
+                view=None,
+            )
 
-            view = ClaimResponseView(claim["id"])
-            try:
-                await lister.send(embed=embed, view=view)
-            except discord.Forbidden:
-                log.warning("Cannot DM user %s for claim %s", lister.id, claim["id"])
+            lister = await _resolve_member(guild, item["user_id"]) if guild else None
+            if lister is not None:
+                embed = discord.Embed(
+                    title="Someone wants your item!",
+                    description=(
+                        f"**{interaction.user.display_name}** wants your "
+                        f"**{item['item_name']}**"
+                    ),
+                    color=discord.Color.gold(),
+                )
+                embed.set_thumbnail(url=interaction.user.display_avatar.url)
+                embed.set_footer(text=config.BOT_NAME)
+
+                view = ClaimResponseView(claim["id"])
+                try:
+                    await lister.send(embed=embed, view=view)
+                except discord.Forbidden:
+                    log.warning("Cannot DM user %s for claim %s", lister.id, claim["id"])
 
         await refresh_board(self.cog.bot, guild)
 
@@ -438,48 +559,49 @@ class AcceptClaimButton(
             await interaction.response.edit_message(content="Item no longer exists.", view=None)
             return
 
+        # Snapshot the rest of the queue before state change
+        other_pending = [
+            c for c in await db.get_pending_claims_for_item(bot.db, item["id"])
+            if c["id"] != self.claim_id
+        ]
+
         await db.accept_claim(bot.db, self.claim_id)
         new_qty = await db.decrement_item(bot.db, item["id"])
 
         status = "gone" if new_qty <= 0 else f"{new_qty} remaining"
+        # Show Confirm Handoff button to the lister
+        confirm_view = discord.ui.View(timeout=None)
+        confirm_view.add_item(ConfirmGivenButton(self.claim_id))
         await interaction.response.edit_message(
             content=(
-                f"\N{WHITE HEAVY CHECK MARK} Accepted! **{item['item_name']}** -- {status}."
+                f"\N{WHITE HEAVY CHECK MARK} Accepted! **{item['item_name']}** -- {status}.\n"
+                f"Once you've handed the item over, click **Confirm Handoff**."
             ),
-            view=None,
+            view=confirm_view,
         )
 
-        # Notify claimer and refresh board
+        # Notify accepted claimer with Confirm Received button
         for guild in bot.guilds:
             if guild.id == item["guild_id"]:
-                claimer = guild.get_member(claim["claimer_id"])
-                if claimer is None:
-                    try:
-                        claimer = await guild.fetch_member(claim["claimer_id"])
-                    except (discord.Forbidden, discord.HTTPException):
-                        claimer = None
+                claimer = await _resolve_member(guild, claim["claimer_id"])
                 if claimer:
+                    taker_view = discord.ui.View(timeout=None)
+                    taker_view.add_item(ConfirmReceivedButton(self.claim_id))
                     try:
                         await claimer.send(
                             f"\N{WHITE HEAVY CHECK MARK} Your claim on **{item['item_name']}** "
                             f"was accepted by **{interaction.user.display_name}**! "
-                            f"Reach out to them to arrange the handoff."
+                            f"Reach out to them to arrange the handoff, then click "
+                            f"**Confirm Received** once you have the item.",
+                            view=taker_view,
                         )
                     except discord.Forbidden:
                         pass
 
-                # Notify claimers who were auto-declined because the item ran out
                 if new_qty <= 0:
-                    auto_declined = await db.get_declined_claims_for_item(bot.db, item["id"])
-                    for dc in auto_declined:
-                        if dc["id"] == self.claim_id:
-                            continue  # This is the accepted claim
-                        dc_member = guild.get_member(dc["claimer_id"])
-                        if dc_member is None:
-                            try:
-                                dc_member = await guild.fetch_member(dc["claimer_id"])
-                            except (discord.Forbidden, discord.HTTPException):
-                                dc_member = None
+                    # Item is gone -- notify remaining queue
+                    for dc in other_pending:
+                        dc_member = await _resolve_member(guild, dc["claimer_id"])
                         if dc_member:
                             try:
                                 await dc_member.send(
@@ -488,6 +610,9 @@ class AcceptClaimButton(
                                 )
                             except discord.Forbidden:
                                 pass
+                else:
+                    # Item still available -- present next in queue
+                    await _send_next_claim_dm(bot, item, guild)
 
                 await refresh_board(bot, guild)
                 break
@@ -530,16 +655,11 @@ class DeclineClaimButton(
             view=None,
         )
 
-        # Notify claimer and refresh board
+        # Notify declined claimer, present next in queue, refresh board
         if item:
             for guild in bot.guilds:
                 if guild.id == item["guild_id"]:
-                    claimer = guild.get_member(claim["claimer_id"])
-                    if claimer is None:
-                        try:
-                            claimer = await guild.fetch_member(claim["claimer_id"])
-                        except (discord.Forbidden, discord.HTTPException):
-                            claimer = None
+                    claimer = await _resolve_member(guild, claim["claimer_id"])
                     if claimer:
                         try:
                             await claimer.send(
@@ -547,8 +667,152 @@ class DeclineClaimButton(
                             )
                         except discord.Forbidden:
                             pass
+                    # Present next person in the queue to the lister
+                    await _send_next_claim_dm(bot, item, guild)
                     await refresh_board(bot, guild)
                     break
+
+
+class ConfirmGivenButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"giveaway:given:(?P<claim_id>\d+)",
+):
+    def __init__(self, claim_id: int):
+        super().__init__(
+            discord.ui.Button(
+                label="Confirm Handoff",
+                style=discord.ButtonStyle.green,
+                custom_id=f"giveaway:given:{claim_id}",
+                emoji="\N{HANDSHAKE}",
+            )
+        )
+        self.claim_id = claim_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["claim_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        bot = interaction.client
+        claim = await db.get_claim(bot.db, self.claim_id)
+        if not claim or claim["status"] != "accepted":
+            await interaction.response.edit_message(
+                content="This claim has already been resolved.", view=None,
+            )
+            return
+
+        if claim["giver_confirmed"]:
+            await interaction.response.edit_message(
+                content="You've already confirmed this handoff.", view=None,
+            )
+            return
+
+        item = await db.get_item(bot.db, claim["item_id"])
+        item_name = item["item_name"] if item else "Unknown item"
+        completed = await db.confirm_given(bot.db, self.claim_id)
+
+        if completed:
+            await interaction.response.edit_message(
+                content=(
+                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
+                    f"Thanks for your generosity."
+                ),
+                view=None,
+            )
+            # Notify taker that handoff is complete
+            if item:
+                for guild in bot.guilds:
+                    if guild.id == item["guild_id"]:
+                        taker = await _resolve_member(guild, claim["claimer_id"])
+                        if taker:
+                            try:
+                                await taker.send(
+                                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
+                                    f"Both sides confirmed."
+                                )
+                            except discord.Forbidden:
+                                pass
+                        await _complete_handoff(bot, claim, item, guild)
+                        break
+        else:
+            await interaction.response.edit_message(
+                content=(
+                    f"\N{WHITE HEAVY CHECK MARK} You confirmed the handoff for **{item_name}**. "
+                    f"Waiting for the recipient to confirm receipt."
+                ),
+                view=None,
+            )
+
+
+class ConfirmReceivedButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"giveaway:received:(?P<claim_id>\d+)",
+):
+    def __init__(self, claim_id: int):
+        super().__init__(
+            discord.ui.Button(
+                label="Confirm Received",
+                style=discord.ButtonStyle.green,
+                custom_id=f"giveaway:received:{claim_id}",
+                emoji="\N{HANDSHAKE}",
+            )
+        )
+        self.claim_id = claim_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["claim_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        bot = interaction.client
+        claim = await db.get_claim(bot.db, self.claim_id)
+        if not claim or claim["status"] != "accepted":
+            await interaction.response.edit_message(
+                content="This claim has already been resolved.", view=None,
+            )
+            return
+
+        if claim["taker_confirmed"]:
+            await interaction.response.edit_message(
+                content="You've already confirmed this receipt.", view=None,
+            )
+            return
+
+        item = await db.get_item(bot.db, claim["item_id"])
+        item_name = item["item_name"] if item else "Unknown item"
+        completed = await db.confirm_received(bot.db, self.claim_id)
+
+        if completed:
+            await interaction.response.edit_message(
+                content=(
+                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
+                    f"Both sides confirmed."
+                ),
+                view=None,
+            )
+            # Notify giver that handoff is complete
+            if item:
+                for guild in bot.guilds:
+                    if guild.id == item["guild_id"]:
+                        giver = await _resolve_member(guild, item["user_id"])
+                        if giver:
+                            try:
+                                await giver.send(
+                                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
+                                    f"Both sides confirmed. Thanks for your generosity."
+                                )
+                            except discord.Forbidden:
+                                pass
+                        await _complete_handoff(bot, claim, item, guild)
+                        break
+        else:
+            await interaction.response.edit_message(
+                content=(
+                    f"\N{WHITE HEAVY CHECK MARK} You confirmed receipt of **{item_name}**. "
+                    f"Waiting for the giver to confirm handoff."
+                ),
+                view=None,
+            )
 
 
 class ManageSelectView(discord.ui.View):
@@ -578,15 +842,28 @@ class ManageSelectView(discord.ui.View):
             )
             return
 
+        # Snapshot pending claims before marking gone so we can notify them
+        pending = await db.get_pending_claims_for_item(self.cog.bot.db, item_id)
+
         await db.mark_item_gone(self.cog.bot.db, item_id)
         await interaction.response.edit_message(
             content=f"**{item['item_name']}** marked as gone.",
             view=None,
         )
 
-        # Refresh the board in the appropriate guild
+        # Notify auto-declined claimers and refresh the board
         for guild in self.cog.bot.guilds:
             if guild.id == item["guild_id"]:
+                for claim in pending:
+                    member = await _resolve_member(guild, claim["claimer_id"])
+                    if member:
+                        try:
+                            await member.send(
+                                f"\N{CROSS MARK} Your claim on **{item['item_name']}** "
+                                f"was declined -- the item is no longer available."
+                            )
+                        except discord.Forbidden:
+                            pass
                 await refresh_board(self.cog.bot, guild)
                 break
 
@@ -629,6 +906,7 @@ async def setup(bot: commands.Bot):
     bot.add_dynamic_items(
         GiveButton, ClaimButton, MyItemsButton,
         AcceptClaimButton, DeclineClaimButton,
+        ConfirmGivenButton, ConfirmReceivedButton,
     )
 
     cog = Giveaways(bot)

@@ -33,6 +33,8 @@ TIME_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
 def build_converted_text(text: str, source_tz: str, target_tz: str) -> str | None:
     """Replace all times in text with converted versions.
 

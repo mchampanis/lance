@@ -40,20 +40,46 @@ async def init_db(db: aiosqlite.Connection) -> None:
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS giveaway_claims (
-            id         INTEGER PRIMARY KEY,
-            item_id    INTEGER NOT NULL REFERENCES giveaway_items(id) ON DELETE CASCADE,
-            claimer_id INTEGER NOT NULL,
-            status     TEXT    NOT NULL DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id               INTEGER PRIMARY KEY,
+            item_id          INTEGER NOT NULL REFERENCES giveaway_items(id) ON DELETE CASCADE,
+            claimer_id       INTEGER NOT NULL,
+            status           TEXT    NOT NULL DEFAULT 'pending',
+            giver_confirmed  INTEGER NOT NULL DEFAULT 0,
+            taker_confirmed  INTEGER NOT NULL DEFAULT 0,
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    await _ensure_giveaway_claims_confirmed(db)
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS giveaway_board (
             guild_id   INTEGER PRIMARY KEY,
             channel_id INTEGER NOT NULL,
             message_id INTEGER NOT NULL
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS giveaway_stats (
+            guild_id    INTEGER NOT NULL,
+            user_id     INTEGER NOT NULL,
+            items_given INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS countdowns (
+            id         INTEGER PRIMARY KEY,
+            guild_id   INTEGER NOT NULL,
+            name       TEXT    NOT NULL,
+            label      TEXT    NOT NULL,
+            timestamp  INTEGER NOT NULL,
+            created_by INTEGER NOT NULL,
+            UNIQUE(guild_id, name)
         )
         """
     )
@@ -74,6 +100,21 @@ async def _ensure_giveaway_items_gone_at(db: aiosqlite.Connection) -> None:
         SET gone_at = CURRENT_TIMESTAMP
         WHERE status = 'gone' AND gone_at IS NULL
         """
+    )
+
+
+async def _ensure_giveaway_claims_confirmed(db: aiosqlite.Connection) -> None:
+    async with db.execute("PRAGMA table_info(giveaway_claims)") as cur:
+        columns = {row[1] for row in await cur.fetchall()}
+
+    if "giver_confirmed" in columns:
+        return
+
+    await db.execute(
+        "ALTER TABLE giveaway_claims ADD COLUMN giver_confirmed INTEGER NOT NULL DEFAULT 0"
+    )
+    await db.execute(
+        "ALTER TABLE giveaway_claims ADD COLUMN taker_confirmed INTEGER NOT NULL DEFAULT 0"
     )
 
 
@@ -198,7 +239,7 @@ async def decrement_item(db: aiosqlite.Connection, item_id: int) -> int:
     return new_qty
 
 
-async def expire_old_items(db: aiosqlite.Connection, hours: int = 72) -> int:
+async def expire_old_items(db: aiosqlite.Connection, hours: int) -> int:
     """Mark items older than `hours` as gone. Returns count of expired items."""
     cur = await db.execute(
         """
@@ -274,14 +315,6 @@ async def get_accepted_claims_for_item(db: aiosqlite.Connection, item_id: int) -
         return await cur.fetchall()
 
 
-async def get_declined_claims_for_item(db: aiosqlite.Connection, item_id: int) -> list[aiosqlite.Row]:
-    async with db.execute(
-        "SELECT * FROM giveaway_claims WHERE item_id = ? AND status = 'declined' ORDER BY created_at",
-        (item_id,),
-    ) as cur:
-        return await cur.fetchall()
-
-
 async def has_active_claim(db: aiosqlite.Connection, item_id: int, claimer_id: int) -> bool:
     """Check if user already has a pending or accepted claim on this item."""
     async with db.execute(
@@ -303,6 +336,38 @@ async def decline_claim(db: aiosqlite.Connection, claim_id: int) -> None:
         "UPDATE giveaway_claims SET status = 'declined' WHERE id = ?", (claim_id,),
     )
     await db.commit()
+
+
+async def confirm_given(db: aiosqlite.Connection, claim_id: int) -> bool:
+    """Mark the giver's side as confirmed. Returns True if handoff is now complete."""
+    await db.execute(
+        "UPDATE giveaway_claims SET giver_confirmed = 1 WHERE id = ?", (claim_id,),
+    )
+    await db.commit()
+    claim = await get_claim(db, claim_id)
+    if claim and claim["giver_confirmed"] and claim["taker_confirmed"]:
+        await db.execute(
+            "UPDATE giveaway_claims SET status = 'completed' WHERE id = ?", (claim_id,),
+        )
+        await db.commit()
+        return True
+    return False
+
+
+async def confirm_received(db: aiosqlite.Connection, claim_id: int) -> bool:
+    """Mark the taker's side as confirmed. Returns True if handoff is now complete."""
+    await db.execute(
+        "UPDATE giveaway_claims SET taker_confirmed = 1 WHERE id = ?", (claim_id,),
+    )
+    await db.commit()
+    claim = await get_claim(db, claim_id)
+    if claim and claim["giver_confirmed"] and claim["taker_confirmed"]:
+        await db.execute(
+            "UPDATE giveaway_claims SET status = 'completed' WHERE id = ?", (claim_id,),
+        )
+        await db.commit()
+        return True
+    return False
 
 
 # -- Giveaway board ------------------------------------------------------------
@@ -329,3 +394,87 @@ async def set_giveaway_board(
         (guild_id, channel_id, message_id),
     )
     await db.commit()
+
+
+# -- Giveaway stats -----------------------------------------------------------
+
+
+async def increment_items_given(db: aiosqlite.Connection, guild_id: int, user_id: int) -> int:
+    """Increment the lister's giveaway counter. Returns the new total."""
+    await db.execute(
+        """
+        INSERT INTO giveaway_stats (guild_id, user_id, items_given)
+        VALUES (?, ?, 1)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            items_given = items_given + 1
+        """,
+        (guild_id, user_id),
+    )
+    await db.commit()
+    async with db.execute(
+        "SELECT items_given FROM giveaway_stats WHERE guild_id = ? AND user_id = ?",
+        (guild_id, user_id),
+    ) as cur:
+        row = await cur.fetchone()
+    return row["items_given"]
+
+
+async def get_items_given(db: aiosqlite.Connection, guild_id: int, user_id: int) -> int:
+    async with db.execute(
+        "SELECT items_given FROM giveaway_stats WHERE guild_id = ? AND user_id = ?",
+        (guild_id, user_id),
+    ) as cur:
+        row = await cur.fetchone()
+    return row["items_given"] if row else 0
+
+
+# -- Countdowns ----------------------------------------------------------------
+
+
+async def create_countdown(
+    db: aiosqlite.Connection,
+    guild_id: int, name: str, label: str, timestamp: int, created_by: int,
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO countdowns (guild_id, name, label, timestamp, created_by)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, name) DO UPDATE SET
+            label = excluded.label,
+            timestamp = excluded.timestamp,
+            created_by = excluded.created_by
+        """,
+        (guild_id, name.lower(), label, timestamp, created_by),
+    )
+    await db.commit()
+
+
+async def get_countdown(
+    db: aiosqlite.Connection, guild_id: int, name: str,
+) -> aiosqlite.Row | None:
+    async with db.execute(
+        "SELECT * FROM countdowns WHERE guild_id = ? AND name = ?",
+        (guild_id, name.lower()),
+    ) as cur:
+        return await cur.fetchone()
+
+
+async def get_all_countdowns(
+    db: aiosqlite.Connection, guild_id: int,
+) -> list[aiosqlite.Row]:
+    async with db.execute(
+        "SELECT * FROM countdowns WHERE guild_id = ? ORDER BY timestamp",
+        (guild_id,),
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def delete_countdown(
+    db: aiosqlite.Connection, guild_id: int, name: str,
+) -> bool:
+    cur = await db.execute(
+        "DELETE FROM countdowns WHERE guild_id = ? AND name = ?",
+        (guild_id, name.lower()),
+    )
+    await db.commit()
+    return cur.rowcount > 0

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Lance is a Swiss army knife Discord bot for the First Wave Survivors community (Arc Raiders). It handles stream announcements, user profiles, timezone conversions, and a community giveaway board.
+Lance is a Swiss army knife Discord bot for the First Wave Survivors community (Arc Raiders). It handles stream announcements, user profiles, timezone conversions, a community giveaway board, and event countdown timers.
 
 ## Stack
 
@@ -22,12 +22,13 @@ uv run python bot.py
 
 - `bot.py` - Entry point, bot lifecycle, healthcheck, database init
 - `config.py` - All configuration from environment variables
-- `db.py` - SQLite schema and helpers (profiles, giveaway items/claims/board)
+- `db.py` - SQLite schema and helpers (profiles, giveaway items/claims/board/stats, countdowns)
 - `cogs/` - Feature modules, one per domain:
   - `streams.py` - Voice channel stream announcements
   - `profiles.py` - `/lance settings` user profiles (Embark ID, timezone)
   - `timeconvert.py` - Clock emoji reaction -> DM with times converted to your timezone
   - `giveaways.py` - Community item giveaway board with claim/accept/decline workflow
+  - `countdowns.py` - Named event countdown timers using Discord timestamps
 
 ## Slash command structure
 
@@ -37,6 +38,9 @@ All user-facing commands live under the `/lance` group, defined in `cogs/__init_
 - `/lance profile @user` (profiles cog)
 - `/lance give` (giveaways cog)
 - `/lance giveaway-setup` (giveaways cog, admin only)
+- `/lance countdown [name]` (countdowns cog)
+- `/lance countdown-create` (countdowns cog, admin only)
+- `/lance countdown-delete` (countdowns cog, admin only)
 - **View Profile** context menu (right-click a user -> Apps; profiles cog)
 
 The streams and timeconvert cogs are purely event-driven (no slash commands).
@@ -47,6 +51,7 @@ The streams and timeconvert cogs are purely event-driven (no slash commands).
 - Embed Links
 - Create Instant Invite (for VC join links)
 - Read Message History
+- Manage Roles (for giveaway milestone role awards)
 
 ## Required Intents
 

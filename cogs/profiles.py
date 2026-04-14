@@ -245,6 +245,7 @@ class Profiles(commands.Cog):
         embed.set_footer(text=f"{config.BOT_NAME} - settings are private to you")
         return embed
 
+
 async def setup(bot: commands.Bot):
     from cogs import lance
 
@@ -282,6 +283,15 @@ async def setup(bot: commands.Bot):
                 "`/lance give Item One, Item Two` -- List items (comma-separated)\n"
                 "Use the **Give Item**, **Claim**, and **My Items** buttons on the board.\n"
                 "`/lance giveaway-setup` -- Post the board (admin only)"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="\N{STOPWATCH} Countdowns",
+            value=(
+                "`/lance countdown` -- Show event countdown timers\n"
+                "`/lance countdown name` -- Show a specific countdown\n"
+                "`/lance countdown-create` -- Create a countdown (admin only)"
             ),
             inline=False,
         )

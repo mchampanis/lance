@@ -40,7 +40,7 @@ Non-secret config can go in `fly.toml` under `[env]` if needed. Secrets are set 
 | `STREAM_ROLE_NAME` | `fly.toml [env]` | Role to ping on stream start (default: LFG Stream) |
 | `TIMEZONE_HELPER_URL` | `fly.toml [env]` | URL to the timezone finder helper page |
 | `TIME_REACT_EMOJI` | `fly.toml [env]` | Emoji that triggers time conversion (default: clock) |
-| `GIVEAWAY_EXPIRY_HOURS` | `fly.toml [env]` | Hours before giveaway items auto-expire (default: 72) |
+| `GIVEAWAY_EXPIRY_HOURS` | `fly.toml [env]` | Hours before giveaway items auto-expire (default: 120) |
 | `HEALTHCHECK_URL` | `fly secrets` | Healthchecks.io ping URL (optional) |
 
 ## Key Details

@@ -16,7 +16,7 @@
 Use this OAuth2 URL, replacing `APPLICATION_ID` with your Application ID (found on the **General Information** page):
 
 ```
-https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot&permissions=83969
+https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot&permissions=268519425
 ```
 
 This grants the bot these permissions:
@@ -24,10 +24,20 @@ This grants the bot these permissions:
 - Send Messages
 - Embed Links
 - Read Message History
+- Manage Roles (for giveaway milestone role awards)
 
 ## 3. Server Preparation
 
 Create a role called **LFG Stream** (or whatever you set `STREAM_ROLE_NAME` to). Members who want stream notifications should self-assign this role.
+
+Create the giveaway milestone roles (the bot awards these automatically but can't create them):
+- **Freebie Giver** (1 item given)
+- **Freebie Apprentice** (5 items)
+- **Freebie Enthusiast** (10 items)
+- **Freebie Champion** (50 items)
+- **Freebie Master** (100 items)
+
+Make sure the bot's role is **above** the milestone roles in the role hierarchy, otherwise it can't assign them. Role names are configurable via `GIVEAWAY_MILESTONES`.
 
 The bot will post announcements to a channel called **#lounge** by default (configurable via `STREAM_CHANNEL_NAME`). Make sure the bot has access to that channel.
 
