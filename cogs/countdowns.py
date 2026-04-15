@@ -65,7 +65,15 @@ class CreateCountdownModal(discord.ui.Modal, title="Create Countdown"):
 
     async def on_submit(self, interaction: discord.Interaction):
         profile = await db.get_profile(self.bot.db, interaction.user.id)
-        user_tz = profile["timezone"] if profile and profile["timezone"] else "UTC"
+        user_tz = profile["timezone"] if profile and profile["timezone"] else None
+
+        if user_tz is None:
+            await interaction.response.send_message(
+                "You haven't set your timezone yet -- the date/time would be "
+                "interpreted as UTC. Set it first with `/lance settings`.",
+                ephemeral=True,
+            )
+            return
 
         parsed = dateparser.parse(
             self.time.value,
@@ -84,7 +92,7 @@ class CreateCountdownModal(discord.ui.Modal, title="Create Countdown"):
             return
 
         ts = int(parsed.timestamp())
-        clean_name = self.name.value.lower().strip().replace(" ", "-")
+        clean_name = db.normalize_countdown_name(self.name.value)
 
         await db.create_countdown(
             self.bot.db, interaction.guild_id, clean_name,

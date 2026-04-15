@@ -46,11 +46,13 @@ async def init_db(db: aiosqlite.Connection) -> None:
             status           TEXT    NOT NULL DEFAULT 'pending',
             giver_confirmed  INTEGER NOT NULL DEFAULT 0,
             taker_confirmed  INTEGER NOT NULL DEFAULT 0,
-            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            accepted_at      TIMESTAMP
         )
         """
     )
     await _ensure_giveaway_claims_confirmed(db)
+    await _ensure_giveaway_claims_accepted_at(db)
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS giveaway_board (
@@ -115,6 +117,26 @@ async def _ensure_giveaway_claims_confirmed(db: aiosqlite.Connection) -> None:
     )
     await db.execute(
         "ALTER TABLE giveaway_claims ADD COLUMN taker_confirmed INTEGER NOT NULL DEFAULT 0"
+    )
+
+
+async def _ensure_giveaway_claims_accepted_at(db: aiosqlite.Connection) -> None:
+    async with db.execute("PRAGMA table_info(giveaway_claims)") as cur:
+        columns = {row[1] for row in await cur.fetchall()}
+
+    if "accepted_at" in columns:
+        return
+
+    await db.execute(
+        "ALTER TABLE giveaway_claims ADD COLUMN accepted_at TIMESTAMP"
+    )
+    # Backfill: existing accepted claims get current time as a best-effort
+    await db.execute(
+        """
+        UPDATE giveaway_claims
+        SET accepted_at = CURRENT_TIMESTAMP
+        WHERE status IN ('accepted', 'completed') AND accepted_at IS NULL
+        """
     )
 
 
@@ -326,7 +348,8 @@ async def has_active_claim(db: aiosqlite.Connection, item_id: int, claimer_id: i
 
 async def accept_claim(db: aiosqlite.Connection, claim_id: int) -> None:
     await db.execute(
-        "UPDATE giveaway_claims SET status = 'accepted' WHERE id = ?", (claim_id,),
+        "UPDATE giveaway_claims SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (claim_id,),
     )
     await db.commit()
 
@@ -339,19 +362,27 @@ async def decline_claim(db: aiosqlite.Connection, claim_id: int) -> None:
 
 
 async def confirm_given(db: aiosqlite.Connection, claim_id: int) -> bool:
-    """Mark the giver's side as confirmed. Returns True if handoff is now complete."""
+    """Mark the giver's side as confirmed. Returns True if handoff is now complete.
+
+    Also completes unilaterally if the claim was accepted 48+ hours ago
+    (covers the case where the taker has DMs closed and can't confirm).
+    """
     await db.execute(
         "UPDATE giveaway_claims SET giver_confirmed = 1 WHERE id = ?", (claim_id,),
     )
+    # Atomically complete -- either both confirmed, or giver override after 48h
+    cur = await db.execute(
+        """
+        UPDATE giveaway_claims SET status = 'completed'
+        WHERE id = ? AND status = 'accepted'
+          AND giver_confirmed = 1
+          AND (taker_confirmed = 1
+               OR accepted_at < datetime('now', '-48 hours'))
+        """,
+        (claim_id,),
+    )
     await db.commit()
-    claim = await get_claim(db, claim_id)
-    if claim and claim["giver_confirmed"] and claim["taker_confirmed"]:
-        await db.execute(
-            "UPDATE giveaway_claims SET status = 'completed' WHERE id = ?", (claim_id,),
-        )
-        await db.commit()
-        return True
-    return False
+    return cur.rowcount > 0
 
 
 async def confirm_received(db: aiosqlite.Connection, claim_id: int) -> bool:
@@ -359,15 +390,17 @@ async def confirm_received(db: aiosqlite.Connection, claim_id: int) -> bool:
     await db.execute(
         "UPDATE giveaway_claims SET taker_confirmed = 1 WHERE id = ?", (claim_id,),
     )
+    # Atomically complete -- WHERE status='accepted' ensures only one caller wins
+    cur = await db.execute(
+        """
+        UPDATE giveaway_claims SET status = 'completed'
+        WHERE id = ? AND status = 'accepted'
+          AND giver_confirmed = 1 AND taker_confirmed = 1
+        """,
+        (claim_id,),
+    )
     await db.commit()
-    claim = await get_claim(db, claim_id)
-    if claim and claim["giver_confirmed"] and claim["taker_confirmed"]:
-        await db.execute(
-            "UPDATE giveaway_claims SET status = 'completed' WHERE id = ?", (claim_id,),
-        )
-        await db.commit()
-        return True
-    return False
+    return cur.rowcount > 0
 
 
 # -- Giveaway board ------------------------------------------------------------
@@ -431,6 +464,10 @@ async def get_items_given(db: aiosqlite.Connection, guild_id: int, user_id: int)
 # -- Countdowns ----------------------------------------------------------------
 
 
+def normalize_countdown_name(name: str) -> str:
+    return name.lower().strip().replace(" ", "-")
+
+
 async def create_countdown(
     db: aiosqlite.Connection,
     guild_id: int, name: str, label: str, timestamp: int, created_by: int,
@@ -444,7 +481,7 @@ async def create_countdown(
             timestamp = excluded.timestamp,
             created_by = excluded.created_by
         """,
-        (guild_id, name.lower(), label, timestamp, created_by),
+        (guild_id, _normalize_countdown_name(name), label, timestamp, created_by),
     )
     await db.commit()
 
@@ -454,7 +491,7 @@ async def get_countdown(
 ) -> aiosqlite.Row | None:
     async with db.execute(
         "SELECT * FROM countdowns WHERE guild_id = ? AND name = ?",
-        (guild_id, name.lower()),
+        (guild_id, _normalize_countdown_name(name)),
     ) as cur:
         return await cur.fetchone()
 
@@ -474,7 +511,7 @@ async def delete_countdown(
 ) -> bool:
     cur = await db.execute(
         "DELETE FROM countdowns WHERE guild_id = ? AND name = ?",
-        (guild_id, name.lower()),
+        (guild_id, _normalize_countdown_name(name)),
     )
     await db.commit()
     return cur.rowcount > 0

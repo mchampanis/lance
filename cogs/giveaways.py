@@ -496,6 +496,7 @@ class ClaimSelectView(discord.ui.View):
             )
 
             lister = await _resolve_member(guild, item["user_id"]) if guild else None
+            dm_sent = False
             if lister is not None:
                 embed = discord.Embed(
                     title="Someone wants your item!",
@@ -511,8 +512,19 @@ class ClaimSelectView(discord.ui.View):
                 view = ClaimResponseView(claim["id"])
                 try:
                     await lister.send(embed=embed, view=view)
+                    dm_sent = True
                 except discord.Forbidden:
                     log.warning("Cannot DM user %s for claim %s", lister.id, claim["id"])
+
+            if not dm_sent:
+                try:
+                    await interaction.user.send(
+                        f"Heads up -- I couldn't DM the owner of **{item['item_name']}** "
+                        f"to notify them of your claim. They may have DMs disabled. "
+                        f"You might need to reach out to them directly."
+                    )
+                except discord.Forbidden:
+                    pass
 
         await refresh_board(self.cog.bot, guild)
 
@@ -701,14 +713,10 @@ class ConfirmGivenButton(
             )
             return
 
-        if claim["giver_confirmed"]:
-            await interaction.response.edit_message(
-                content="You've already confirmed this handoff.", view=None,
-            )
-            return
-
         item = await db.get_item(bot.db, claim["item_id"])
         item_name = item["item_name"] if item else "Unknown item"
+        # Re-running confirm_given is safe (sets flag idempotently) and
+        # allows the 48h giver override to trigger on a second click
         completed = await db.confirm_given(bot.db, self.claim_id)
 
         if completed:
@@ -735,12 +743,16 @@ class ConfirmGivenButton(
                         await _complete_handoff(bot, claim, item, guild)
                         break
         else:
+            confirm_view = discord.ui.View(timeout=None)
+            confirm_view.add_item(ConfirmGivenButton(self.claim_id))
             await interaction.response.edit_message(
                 content=(
                     f"\N{WHITE HEAVY CHECK MARK} You confirmed the handoff for **{item_name}**. "
-                    f"Waiting for the recipient to confirm receipt."
+                    f"Waiting for the recipient to confirm receipt.\n"
+                    f"-# If they don't respond within 48h of the accept, "
+                    f"click the button again to complete it."
                 ),
-                view=None,
+                view=confirm_view,
             )
 
 
