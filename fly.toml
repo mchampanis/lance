@@ -11,6 +11,8 @@ primary_region = 'ams'
 
 [env]
   DB_PATH = '/data/lance.db'
+  STREAM_CHANNEL_NAME='lounge'
+  STREAM_ROLE_NAME='LFG Stream'
 
 [processes]
   bot = 'uv run --no-sync python bot.py'
