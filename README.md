@@ -41,6 +41,7 @@ Deployed to Fly.io. See [FLY-DEPLOY.md](FLY-DEPLOY.md) for details. Pushes to `m
 | `TIME_REACT_EMOJI` | No | `\N{MANTELPIECE CLOCK}` | Emoji that triggers time conversion |
 | `GIVEAWAY_EXPIRY_HOURS` | No | `120` | Hours before giveaway items auto-expire |
 | `GIVEAWAY_MILESTONES` | No | see `.env.example` | Milestone roles: `count:Role Name,...` |
+| `TESTING` | No | `false` | Disables the self-claim guard (for local testing only) |
 | `HEALTHCHECK_URL` | No | - | Healthchecks.io ping URL |
 
 ## License

@@ -507,10 +507,10 @@ class MyClaimsButton(
             )
             return
 
-        # Build display and select options
+        # Build display and select options (capped at Discord's 25-option limit)
         options = []
         lines = []
-        for claim in claims:
+        for claim in claims[:MAX_SELECT_OPTIONS]:
             item = await db.get_item(cog.bot.db, claim["item_id"])
             if item is None:
                 continue
@@ -529,6 +529,8 @@ class MyClaimsButton(
                     value=str(claim["id"]),
                 )
             )
+        if len(claims) > MAX_SELECT_OPTIONS:
+            lines.append(f"-# ...and {len(claims) - MAX_SELECT_OPTIONS} more not shown")
 
         if not options:
             await interaction.response.send_message(
@@ -1112,7 +1114,7 @@ class ConfirmReceivedButton(
                     f"\N{WHITE HEAVY CHECK MARK} You confirmed receipt of **{item_name}**. "
                     f"Waiting for the giver to confirm hand over."
                 ),
-                view=None,
+                view=_dismiss_view(),
             )
 
 

@@ -245,22 +245,6 @@ async def mark_item_gone(db: aiosqlite.Connection, item_id: int) -> None:
     await db.commit()
 
 
-async def decrement_item(db: aiosqlite.Connection, item_id: int) -> int:
-    """Decrement quantity by 1. Marks gone if it reaches 0. Returns new quantity."""
-    await db.execute(
-        "UPDATE giveaway_items SET quantity = quantity - 1 WHERE id = ? AND quantity > 0",
-        (item_id,),
-    )
-    async with db.execute("SELECT quantity FROM giveaway_items WHERE id = ?", (item_id,)) as cur:
-        row = await cur.fetchone()
-    new_qty = row["quantity"] if row else 0
-    if new_qty <= 0:
-        await mark_item_gone(db, item_id)
-    else:
-        await db.commit()
-    return new_qty
-
-
 async def expire_old_items(db: aiosqlite.Connection, hours: int) -> int:
     """Mark items older than `hours` as gone. Returns count of expired items."""
     cur = await db.execute(
@@ -364,7 +348,11 @@ async def has_active_claim(db: aiosqlite.Connection, item_id: int, claimer_id: i
 
 async def accept_claim(db: aiosqlite.Connection, claim_id: int) -> None:
     await db.execute(
-        "UPDATE giveaway_claims SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP WHERE id = ?",
+        """
+        UPDATE giveaway_claims
+        SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'pending'
+        """,
         (claim_id,),
     )
     await db.commit()
@@ -372,7 +360,8 @@ async def accept_claim(db: aiosqlite.Connection, claim_id: int) -> None:
 
 async def decline_claim(db: aiosqlite.Connection, claim_id: int) -> None:
     await db.execute(
-        "UPDATE giveaway_claims SET status = 'declined' WHERE id = ?", (claim_id,),
+        "UPDATE giveaway_claims SET status = 'declined' WHERE id = ? AND status = 'pending'",
+        (claim_id,),
     )
     await db.commit()
 
