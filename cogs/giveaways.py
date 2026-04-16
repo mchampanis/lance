@@ -9,15 +9,15 @@ Lifecycle of an item:
   2. Item appears on the board as "available"
   3. Another user clicks Claim -> joins a queue (ordered by time)
   4. First in queue is presented to the lister via DM (Accept/Decline)
-  5. Accept -> quantity decremented, next in queue presented (or all
-     notified if item is gone)
+  5. Accept -> item removed from the board, remaining queue notified
   6. Decline -> claimer notified, next in queue presented
-  7. Lister can Mark Gone at any time (remaining queue notified)
+  7. Lister can remove an item at any time (remaining queue notified)
   8. Items auto-expire after GIVEAWAY_EXPIRY_HOURS (default 120)
   9. Gone items purged from DB after 7 days
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 import discord
@@ -30,6 +30,30 @@ import db
 log = logging.getLogger("lance.giveaways")
 
 MAX_SELECT_OPTIONS = 25
+BLUEPRINT_PATTERN = re.compile(r"\b(bp|blueprint)s?\b", re.IGNORECASE)
+
+
+async def _dismiss_ephemeral(interaction: discord.Interaction) -> None:
+    """Delete the ephemeral message this component interaction was attached to."""
+    try:
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+    except discord.HTTPException:
+        try:
+            await interaction.edit_original_response(
+                content="Cancelled.", embed=None, view=None,
+            )
+        except discord.HTTPException:
+            pass
+
+
+def _item_emoji(item_name: str, guild: discord.Guild) -> str:
+    """Return the emoji for an item: custom :blueprint: if matched, else a package."""
+    if BLUEPRINT_PATTERN.search(item_name):
+        bp_emoji = discord.utils.get(guild.emojis, name="blueprint")
+        if bp_emoji:
+            return str(bp_emoji)
+    return "\N{PACKAGE}"
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -56,7 +80,7 @@ async def build_board_embed(bot: commands.Bot, guild: discord.Guild) -> discord.
     items = await db.get_available_items(bot.db, guild.id)
 
     embed = discord.Embed(
-        title="\N{PACKAGE} Community Giveaways",
+        title="\N{WRAPPED PRESENT} Community Giveaways",
         color=discord.Color.green(),
         timestamp=datetime.now(timezone.utc),
     )
@@ -64,36 +88,41 @@ async def build_board_embed(bot: commands.Bot, guild: discord.Guild) -> discord.
     if not items:
         embed.description = (
             "No items available right now.\n\n"
-            "Click **Give Item** below or use `/lance give` to list something!"
+            "Click **Add New Item** below or use `/lance give` to list something!"
         )
     else:
         lines = []
         for item in items:
-            qty = f" x{item['quantity']}" if item["quantity"] > 1 else ""
             member = guild.get_member(item["user_id"])
             who = member.mention if member else f"<@{item['user_id']}>"
-            age = _age(item["created_at"])
 
-            line = f"**#{item['id']}** {item['item_name']}{qty} -- {who} ({age})"
+            created_dt = datetime.fromisoformat(item["created_at"]).replace(tzinfo=timezone.utc)
+            ts = int(created_dt.timestamp())
+
+            emoji = _item_emoji(item["item_name"], guild)
+            line = (
+                f"{emoji} **{item['item_name']}**\n"
+                f"-# from {who} · <t:{ts}:R>"
+            )
 
             # Show accepted claims
             accepted = await db.get_accepted_claims_for_item(bot.db, item["id"])
             for claim in accepted:
                 claimer = guild.get_member(claim["claimer_id"])
                 claimer_name = claimer.mention if claimer else f"<@{claim['claimer_id']}>"
-                line += f"\n> Promised to {claimer_name}"
+                line += f"\n> \N{WHITE HEAVY CHECK MARK} Promised to {claimer_name}"
 
             # Show queue size
             pending = await db.get_pending_claims_for_item(bot.db, item["id"])
             if pending:
-                line += f"\n> {len(pending)} in queue"
+                line += f"\n> \N{RAISED HAND} {len(pending)} in queue"
 
             lines.append(line)
 
         embed.description = "\n\n".join(lines)
 
     embed.set_footer(
-        text=f"{config.BOT_NAME} -- items expire after {config.GIVEAWAY_EXPIRY_HOURS}h"
+        text=f"Items expire after {config.GIVEAWAY_EXPIRY_HOURS}h"
     )
     return embed
 
@@ -148,10 +177,8 @@ async def _send_next_claim_dm(bot: commands.Bot, item, guild: discord.Guild) -> 
         embed.set_thumbnail(url=claimer.display_avatar.url)
 
     queue_remaining = len(pending) - 1
-    footer = config.BOT_NAME
     if queue_remaining > 0:
-        footer += f" -- {queue_remaining} more in queue"
-    embed.set_footer(text=footer)
+        embed.set_footer(text=f"{queue_remaining} more in queue")
 
     view = ClaimResponseView(next_claim["id"])
     try:
@@ -175,10 +202,14 @@ async def _resolve_member(
 
 async def _check_milestone_roles(
     bot: commands.Bot, guild: discord.Guild, user_id: int, new_total: int,
-) -> None:
-    """Award the correct milestone role and remove any lower ones."""
+) -> str | None:
+    """Award the correct milestone role and remove any lower ones.
+
+    Returns the name of a *newly* awarded role (i.e. one the member didn't
+    already have), or None if no new role was awarded.
+    """
     if not config.GIVEAWAY_MILESTONES:
-        return
+        return None
 
     earned_role_name = None
     lower_role_names = []
@@ -192,21 +223,23 @@ async def _check_milestone_roles(
             break
 
     if earned_role_name is None:
-        return
+        return None
 
     member = await _resolve_member(guild, user_id)
     if member is None:
-        return
+        return None
 
     # Build a lookup of guild roles by name
     guild_roles = {r.name: r for r in guild.roles}
 
     # Award the earned role
+    newly_earned = None
     earned_role = guild_roles.get(earned_role_name)
     if earned_role and earned_role not in member.roles:
         try:
             await member.add_roles(earned_role, reason=f"Giveaway milestone: {new_total} items given")
             log.info("Awarded %s to %s (%d items given)", earned_role_name, member, new_total)
+            newly_earned = earned_role_name
         except discord.Forbidden:
             log.warning("Missing permissions to assign role %s", earned_role_name)
 
@@ -219,17 +252,31 @@ async def _check_milestone_roles(
             except discord.Forbidden:
                 pass
 
+    return newly_earned
+
 
 async def _complete_handoff(
     bot: commands.Bot, claim, item, guild: discord.Guild,
-) -> None:
-    """Called when both giver and taker confirm. Increments stats and checks milestones."""
+) -> tuple[int, str | None]:
+    """Called when both giver and taker confirm. Increments stats and checks milestones.
+
+    Returns (new_total, newly_earned_role_name).
+    """
     new_total = await db.increment_items_given(bot.db, guild.id, item["user_id"])
-    await _check_milestone_roles(bot, guild, item["user_id"], new_total)
+    newly_earned = await _check_milestone_roles(bot, guild, item["user_id"], new_total)
     log.info(
         "Handoff complete: item %d, claim %d, giver %d now at %d total",
         item["id"], claim["id"], item["user_id"], new_total,
     )
+    return new_total, newly_earned
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 # -- Modals -------------------------------------------------------------------
@@ -242,13 +289,6 @@ class GiveItemModal(discord.ui.Modal, title="Give Away Items"):
         required=True,
         max_length=300,
     )
-    quantity: discord.ui.TextInput = discord.ui.TextInput(
-        label="Quantity (each)",
-        placeholder="1",
-        required=False,
-        max_length=4,
-        default="1",
-    )
 
     def __init__(self, cog: "Giveaways"):
         super().__init__()
@@ -260,24 +300,15 @@ class GiveItemModal(discord.ui.Modal, title="Give Away Items"):
             await interaction.response.send_message("Item name can't be empty.", ephemeral=True)
             return
 
-        try:
-            qty = int(self.quantity.value.strip() or "1")
-            if qty < 1:
-                raise ValueError
-        except ValueError:
-            await interaction.response.send_message("Quantity must be a positive number.", ephemeral=True)
-            return
-
         for name in names:
             await db.create_item(
-                self.cog.bot.db, interaction.guild_id, interaction.user.id, name, qty,
+                self.cog.bot.db, interaction.guild_id, interaction.user.id, name,
             )
 
-        qty_str = f" x{qty}" if qty > 1 else ""
         if len(names) == 1:
-            summary = f"**{names[0]}{qty_str}**"
+            summary = f"**{names[0]}**"
         else:
-            summary = ", ".join(f"**{n}{qty_str}**" for n in names)
+            summary = ", ".join(f"**{n}**" for n in names)
         await interaction.response.send_message(
             f"Listed {summary} on the giveaway board!",
             ephemeral=True,
@@ -296,6 +327,7 @@ class BoardView(discord.ui.View):
         self.add_item(GiveButton(guild_id))
         self.add_item(ClaimButton(guild_id))
         self.add_item(MyItemsButton(guild_id))
+        self.add_item(MyClaimsButton(guild_id))
 
 
 class GiveButton(
@@ -305,7 +337,7 @@ class GiveButton(
     def __init__(self, guild_id: int):
         super().__init__(
             discord.ui.Button(
-                label="Give Item",
+                label="Add New Item",
                 style=discord.ButtonStyle.green,
                 custom_id=f"giveaway:give:{guild_id}",
                 emoji="\N{PACKAGE}",
@@ -329,10 +361,10 @@ class ClaimButton(
     def __init__(self, guild_id: int):
         super().__init__(
             discord.ui.Button(
-                label="Claim",
+                label="Claim an item",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"giveaway:claim:{guild_id}",
-                emoji="\N{RAISED HAND}",
+                emoji="\N{SHOPPING TROLLEY}",
             )
         )
         self.guild_id = guild_id
@@ -344,8 +376,9 @@ class ClaimButton(
     async def callback(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("Giveaways")
         items = await db.get_available_items(cog.bot.db, self.guild_id)
-        # Exclude the user's own items
-        items = [i for i in items if i["user_id"] != interaction.user.id]
+        # Exclude the user's own items (unless testing)
+        if not config.TESTING:
+            items = [i for i in items if i["user_id"] != interaction.user.id]
 
         if not items:
             await interaction.response.send_message(
@@ -355,12 +388,12 @@ class ClaimButton(
 
         options = []
         for item in items[:MAX_SELECT_OPTIONS]:
-            qty = f" x{item['quantity']}" if item["quantity"] > 1 else ""
+
             member = interaction.guild.get_member(item["user_id"])
             who = member.display_name if member else "Unknown"
             options.append(
                 discord.SelectOption(
-                    label=f"{item['item_name']}{qty}",
+                    label=f"{item['item_name']}",
                     description=f"From {who} ({_age(item['created_at'])})",
                     value=str(item["id"]),
                 )
@@ -379,10 +412,11 @@ class MyItemsButton(
     def __init__(self, guild_id: int):
         super().__init__(
             discord.ui.Button(
-                label="My Items",
+                label="My Giveaways",
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"giveaway:mine:{guild_id}",
                 emoji="\N{MEMO}",
+                row=1,
             )
         )
         self.guild_id = guild_id
@@ -407,16 +441,15 @@ class MyItemsButton(
         )
         lines = []
         for item in items:
-            qty = f" x{item['quantity']}" if item["quantity"] > 1 else ""
-            line = f"**#{item['id']}** {item['item_name']}{qty} ({_age(item['created_at'])})"
+
+            line = f"**#{item['id']}** {item['item_name']} ({_age(item['created_at'])})"
 
             pending = await db.get_pending_claims_for_item(cog.bot.db, item["id"])
             if pending:
                 for i, claim in enumerate(pending, 1):
                     claimer = interaction.guild.get_member(claim["claimer_id"])
                     name = claimer.display_name if claimer else f"User {claim['claimer_id']}"
-                    label = "Next up" if i == 1 else f"#{i} in queue"
-                    line += f"\n> {label}: {name}"
+                    line += f"\n> #{i} in queue: {name}"
 
             accepted = await db.get_accepted_claims_for_item(cog.bot.db, item["id"])
             for claim in accepted:
@@ -431,16 +464,170 @@ class MyItemsButton(
         # Build management options
         options = []
         for item in items[:MAX_SELECT_OPTIONS]:
-            qty = f" x{item['quantity']}" if item["quantity"] > 1 else ""
+
             options.append(
                 discord.SelectOption(
-                    label=f"#{item['id']} {item['item_name']}{qty}",
+                    label=f"#{item['id']} {item['item_name']}",
                     value=str(item["id"]),
                 )
             )
 
         view = ManageSelectView(cog, options)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class MyClaimsButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"giveaway:myclaims:(?P<guild_id>\d+)",
+):
+    def __init__(self, guild_id: int):
+        super().__init__(
+            discord.ui.Button(
+                label="My Claims",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"giveaway:myclaims:{guild_id}",
+                emoji="\N{RAISED HAND}",
+                row=1,
+            )
+        )
+        self.guild_id = guild_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["guild_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Giveaways")
+        claims = await db.get_user_pending_claims(
+            cog.bot.db, self.guild_id, interaction.user.id,
+        )
+        if not claims:
+            await interaction.response.send_message(
+                "You have no pending claims.", ephemeral=True,
+            )
+            return
+
+        # Build display and select options
+        options = []
+        lines = []
+        for claim in claims:
+            item = await db.get_item(cog.bot.db, claim["item_id"])
+            if item is None:
+                continue
+            # Position in queue for this item
+            pending = await db.get_pending_claims_for_item(cog.bot.db, item["id"])
+            position = next(
+                (i + 1 for i, p in enumerate(pending) if p["id"] == claim["id"]),
+                None,
+            )
+            pos_label = f"#{position} in queue"
+            lines.append(f"**{item['item_name']}** -- {pos_label}")
+            options.append(
+                discord.SelectOption(
+                    label=item["item_name"][:100],
+                    description=pos_label,
+                    value=str(claim["id"]),
+                )
+            )
+
+        if not options:
+            await interaction.response.send_message(
+                "You have no pending claims.", ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="Your pending claims",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        view = CancelClaimSelectView(cog, options)
+        await interaction.response.send_message(
+            embed=embed, view=view, ephemeral=True,
+        )
+
+
+# -- Ephemeral views (not persistent, timeout OK) ----------------------------
+
+
+class CancelClaimSelectView(discord.ui.View):
+    def __init__(self, cog: "Giveaways", options: list[discord.SelectOption]):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.select = discord.ui.Select(
+            placeholder="Select a claim to cancel...",
+            options=options,
+        )
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss_ephemeral(interaction)
+
+    async def on_select(self, interaction: discord.Interaction):
+        claim_id = int(self.select.values[0])
+        claim = await db.get_claim(self.cog.bot.db, claim_id)
+        if not claim or claim["status"] != "pending":
+            await interaction.response.edit_message(
+                content="That claim is no longer active.", view=None,
+            )
+            return
+        item = await db.get_item(self.cog.bot.db, claim["item_id"])
+        item_name = item["item_name"] if item else "Unknown item"
+
+        view = ConfirmCancelClaimView(self.cog, claim_id, item_name)
+        await interaction.response.edit_message(
+            content=f"Cancel your claim on **{item_name}**?",
+            embed=None,
+            view=view,
+        )
+
+
+class ConfirmCancelClaimView(discord.ui.View):
+    def __init__(self, cog: "Giveaways", claim_id: int, item_name: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.claim_id = claim_id
+        self.item_name = item_name
+
+    @discord.ui.button(label="Cancel Claim", style=discord.ButtonStyle.danger, emoji="\N{CROSS MARK}")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        claim = await db.get_claim(self.cog.bot.db, self.claim_id)
+        if not claim or claim["status"] != "pending":
+            await interaction.response.edit_message(
+                content="That claim is no longer active.", view=None,
+            )
+            return
+
+        item = await db.get_item(self.cog.bot.db, claim["item_id"])
+        if item is None:
+            await interaction.response.edit_message(
+                content="Item no longer exists.", view=None,
+            )
+            return
+
+        # Check if this claimer was first in queue (their removal should advance the queue)
+        pending_before = await db.get_pending_claims_for_item(self.cog.bot.db, item["id"])
+        was_first = pending_before and pending_before[0]["id"] == self.claim_id
+
+        await db.decline_claim(self.cog.bot.db, self.claim_id)
+
+        await interaction.response.edit_message(
+            content=f"Your claim on **{self.item_name}** has been cancelled.",
+            view=None,
+        )
+
+        guild = interaction.guild
+        if guild is not None:
+            if was_first:
+                # Present next person in queue to the lister
+                await _send_next_claim_dm(self.cog.bot, item, guild)
+            await refresh_board(self.cog.bot, guild)
+
+    @discord.ui.button(label="Keep Claim", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss_ephemeral(interaction)
 
 
 # -- Ephemeral views (not persistent, timeout OK) ----------------------------
@@ -456,6 +643,10 @@ class ClaimSelectView(discord.ui.View):
         )
         self.select.callback = self.on_select
         self.add_item(self.select)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss_ephemeral(interaction)
 
     async def on_select(self, interaction: discord.Interaction):
         item_id = int(self.select.values[0])
@@ -473,9 +664,47 @@ class ClaimSelectView(discord.ui.View):
             )
             return
 
+        # Confirm before creating the claim
+        view = ConfirmClaimView(self.cog, item_id, item["item_name"])
+        await interaction.response.edit_message(
+            content=f"Claim **{item['item_name']}**?",
+            view=view,
+        )
+
+
+class ConfirmClaimView(discord.ui.View):
+    def __init__(self, cog: "Giveaways", item_id: int, item_name: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.item_id = item_id
+        self.item_name = item_name
+
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="\N{RAISED HAND}")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await db.get_item(self.cog.bot.db, self.item_id)
+
+        if not item or item["status"] != "available":
+            await interaction.response.edit_message(
+                content="That item is no longer available.", view=None,
+            )
+            return
+
+        already = await db.has_active_claim(
+            self.cog.bot.db, self.item_id, interaction.user.id,
+        )
+        if already:
+            await interaction.response.edit_message(
+                content="You already have a claim on that item.", view=None,
+            )
+            return
+
         # Check existing queue before creating the claim
-        existing_pending = await db.get_pending_claims_for_item(self.cog.bot.db, item_id)
-        claim = await db.create_claim(self.cog.bot.db, item_id, interaction.user.id)
+        existing_pending = await db.get_pending_claims_for_item(
+            self.cog.bot.db, self.item_id,
+        )
+        claim = await db.create_claim(
+            self.cog.bot.db, self.item_id, interaction.user.id,
+        )
 
         guild = interaction.guild
         if existing_pending:
@@ -483,7 +712,7 @@ class ClaimSelectView(discord.ui.View):
             position = len(existing_pending) + 1
             await interaction.response.edit_message(
                 content=(
-                    f"You're **#{position}** in the queue for **{item['item_name']}**. "
+                    f"You're **#{position}** in the queue for **{self.item_name}**. "
                     f"You'll be notified when it's your turn."
                 ),
                 view=None,
@@ -491,7 +720,7 @@ class ClaimSelectView(discord.ui.View):
         else:
             # First in queue -- DM the lister
             await interaction.response.edit_message(
-                content=f"Claim submitted for **{item['item_name']}**! The owner has been notified.",
+                content=f"Claim submitted for **{self.item_name}**! The owner has been notified.",
                 view=None,
             )
 
@@ -502,12 +731,11 @@ class ClaimSelectView(discord.ui.View):
                     title="Someone wants your item!",
                     description=(
                         f"**{interaction.user.display_name}** wants your "
-                        f"**{item['item_name']}**"
+                        f"**{self.item_name}**"
                     ),
                     color=discord.Color.gold(),
                 )
                 embed.set_thumbnail(url=interaction.user.display_avatar.url)
-                embed.set_footer(text=config.BOT_NAME)
 
                 view = ClaimResponseView(claim["id"])
                 try:
@@ -519,7 +747,7 @@ class ClaimSelectView(discord.ui.View):
             if not dm_sent:
                 try:
                     await interaction.user.send(
-                        f"Heads up -- I couldn't DM the owner of **{item['item_name']}** "
+                        f"Heads up -- I couldn't DM the owner of **{self.item_name}** "
                         f"to notify them of your claim. They may have DMs disabled. "
                         f"You might need to reach out to them directly."
                     )
@@ -527,6 +755,10 @@ class ClaimSelectView(discord.ui.View):
                     pass
 
         await refresh_board(self.cog.bot, guild)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss_ephemeral(interaction)
 
 
 class ClaimResponseView(discord.ui.View):
@@ -536,6 +768,40 @@ class ClaimResponseView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(AcceptClaimButton(claim_id))
         self.add_item(DeclineClaimButton(claim_id))
+
+
+class DismissDMButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"giveaway:dismiss",
+):
+    def __init__(self):
+        super().__init__(
+            discord.ui.Button(
+                label="Dismiss Message",
+                style=discord.ButtonStyle.secondary,
+                custom_id="giveaway:dismiss",
+                emoji="\N{WASTEBASKET}",
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            await interaction.response.edit_message(
+                content="Could not delete the message.", view=None,
+            )
+
+
+def _dismiss_view() -> discord.ui.View:
+    """A view with only a Dismiss button, for terminal/orphan states."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(DismissDMButton())
+    return view
 
 
 class AcceptClaimButton(
@@ -562,13 +828,15 @@ class AcceptClaimButton(
         claim = await db.get_claim(bot.db, self.claim_id)
         if not claim or claim["status"] != "pending":
             await interaction.response.edit_message(
-                content="This claim has already been resolved.", view=None,
+                content="This claim has already been resolved.", view=_dismiss_view(),
             )
             return
 
         item = await db.get_item(bot.db, claim["item_id"])
         if not item:
-            await interaction.response.edit_message(content="Item no longer exists.", view=None)
+            await interaction.response.edit_message(
+                content="Item no longer exists.", view=_dismiss_view(),
+            )
             return
 
         # Snapshot the rest of the queue before state change
@@ -578,16 +846,16 @@ class AcceptClaimButton(
         ]
 
         await db.accept_claim(bot.db, self.claim_id)
-        new_qty = await db.decrement_item(bot.db, item["id"])
+        await db.mark_item_gone(bot.db, item["id"])
 
-        status = "gone" if new_qty <= 0 else f"{new_qty} remaining"
-        # Show Confirm Handoff button to the lister
+        # Show Confirm Hand Over + Dismiss buttons to the lister
         confirm_view = discord.ui.View(timeout=None)
         confirm_view.add_item(ConfirmGivenButton(self.claim_id))
+        confirm_view.add_item(DismissDMButton())
         await interaction.response.edit_message(
             content=(
-                f"\N{WHITE HEAVY CHECK MARK} Accepted! **{item['item_name']}** -- {status}.\n"
-                f"Once you've handed the item over, click **Confirm Handoff**."
+                f"\N{WHITE HEAVY CHECK MARK} Accepted! **{item['item_name']}**.\n"
+                f"Once you've handed the item over, click **Confirm Hand Over**."
             ),
             view=confirm_view,
         )
@@ -603,28 +871,24 @@ class AcceptClaimButton(
                         await claimer.send(
                             f"\N{WHITE HEAVY CHECK MARK} Your claim on **{item['item_name']}** "
                             f"was accepted by **{interaction.user.display_name}**! "
-                            f"Reach out to them to arrange the handoff, then click "
+                            f"Reach out to them to arrange the hand over, then click "
                             f"**Confirm Received** once you have the item.",
                             view=taker_view,
                         )
                     except discord.Forbidden:
                         pass
 
-                if new_qty <= 0:
-                    # Item is gone -- notify remaining queue
-                    for dc in other_pending:
-                        dc_member = await _resolve_member(guild, dc["claimer_id"])
-                        if dc_member:
-                            try:
-                                await dc_member.send(
-                                    f"\N{CROSS MARK} Your claim on **{item['item_name']}** "
-                                    f"was declined -- the item is no longer available."
-                                )
-                            except discord.Forbidden:
-                                pass
-                else:
-                    # Item still available -- present next in queue
-                    await _send_next_claim_dm(bot, item, guild)
+                # Item is gone -- notify remaining queue
+                for dc in other_pending:
+                    dc_member = await _resolve_member(guild, dc["claimer_id"])
+                    if dc_member:
+                        try:
+                            await dc_member.send(
+                                f"\N{CROSS MARK} Your claim on **{item['item_name']}** "
+                                f"was declined -- the item is no longer available."
+                            )
+                        except discord.Forbidden:
+                            pass
 
                 await refresh_board(bot, guild)
                 break
@@ -654,7 +918,7 @@ class DeclineClaimButton(
         claim = await db.get_claim(bot.db, self.claim_id)
         if not claim or claim["status"] != "pending":
             await interaction.response.edit_message(
-                content="This claim has already been resolved.", view=None,
+                content="This claim has already been resolved.", view=_dismiss_view(),
             )
             return
 
@@ -664,7 +928,7 @@ class DeclineClaimButton(
         item_name = item["item_name"] if item else "Unknown item"
         await interaction.response.edit_message(
             content=f"\N{CROSS MARK} Declined the claim on **{item_name}**.",
-            view=None,
+            view=_dismiss_view(),
         )
 
         # Notify declined claimer, present next in queue, refresh board
@@ -692,7 +956,7 @@ class ConfirmGivenButton(
     def __init__(self, claim_id: int):
         super().__init__(
             discord.ui.Button(
-                label="Confirm Handoff",
+                label="Confirm Hand Over",
                 style=discord.ButtonStyle.green,
                 custom_id=f"giveaway:given:{claim_id}",
                 emoji="\N{HANDSHAKE}",
@@ -709,7 +973,7 @@ class ConfirmGivenButton(
         claim = await db.get_claim(bot.db, self.claim_id)
         if not claim or claim["status"] != "accepted":
             await interaction.response.edit_message(
-                content="This claim has already been resolved.", view=None,
+                content="This claim has already been resolved.", view=_dismiss_view(),
             )
             return
 
@@ -720,14 +984,31 @@ class ConfirmGivenButton(
         completed = await db.confirm_given(bot.db, self.claim_id)
 
         if completed:
-            await interaction.response.edit_message(
-                content=(
-                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
-                    f"Thanks for your generosity."
-                ),
-                view=None,
+            # Complete stats/milestones first so we can include the count in the DM
+            new_total = 0
+            newly_earned = None
+            if item:
+                for guild in bot.guilds:
+                    if guild.id == item["guild_id"]:
+                        new_total, newly_earned = await _complete_handoff(
+                            bot, claim, item, guild,
+                        )
+                        break
+
+            content = (
+                f"\N{HANDSHAKE} Hand over complete for **{item_name}**! "
+                f"Thank you, this is your {_ordinal(new_total)} giveaway!"
             )
-            # Notify taker that handoff is complete
+            if newly_earned:
+                content += (
+                    f"\n\n\N{PARTY POPPER} **Congratulations!** You've earned the "
+                    f"**{newly_earned}** role!"
+                )
+            await interaction.response.edit_message(
+                content=content, view=_dismiss_view(),
+            )
+
+            # Notify taker that the hand over is complete
             if item:
                 for guild in bot.guilds:
                     if guild.id == item["guild_id"]:
@@ -735,19 +1016,19 @@ class ConfirmGivenButton(
                         if taker:
                             try:
                                 await taker.send(
-                                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
+                                    f"\N{HANDSHAKE} Hand over complete for **{item_name}**! "
                                     f"Both sides confirmed."
                                 )
                             except discord.Forbidden:
                                 pass
-                        await _complete_handoff(bot, claim, item, guild)
                         break
         else:
             confirm_view = discord.ui.View(timeout=None)
             confirm_view.add_item(ConfirmGivenButton(self.claim_id))
+            confirm_view.add_item(DismissDMButton())
             await interaction.response.edit_message(
                 content=(
-                    f"\N{WHITE HEAVY CHECK MARK} You confirmed the handoff for **{item_name}**. "
+                    f"\N{WHITE HEAVY CHECK MARK} You confirmed the hand over for **{item_name}**. "
                     f"Waiting for the recipient to confirm receipt.\n"
                     f"-# If they don't respond within 48h of the accept, "
                     f"click the button again to complete it."
@@ -780,13 +1061,13 @@ class ConfirmReceivedButton(
         claim = await db.get_claim(bot.db, self.claim_id)
         if not claim or claim["status"] != "accepted":
             await interaction.response.edit_message(
-                content="This claim has already been resolved.", view=None,
+                content="This claim has already been resolved.", view=_dismiss_view(),
             )
             return
 
         if claim["taker_confirmed"]:
             await interaction.response.edit_message(
-                content="You've already confirmed this receipt.", view=None,
+                content="You've already confirmed this receipt.", view=_dismiss_view(),
             )
             return
 
@@ -797,31 +1078,39 @@ class ConfirmReceivedButton(
         if completed:
             await interaction.response.edit_message(
                 content=(
-                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
+                    f"\N{HANDSHAKE} Hand over complete for **{item_name}**! "
                     f"Both sides confirmed."
                 ),
-                view=None,
+                view=_dismiss_view(),
             )
-            # Notify giver that handoff is complete
+            # Complete stats/milestones and notify the giver
             if item:
                 for guild in bot.guilds:
                     if guild.id == item["guild_id"]:
+                        new_total, newly_earned = await _complete_handoff(
+                            bot, claim, item, guild,
+                        )
                         giver = await _resolve_member(guild, item["user_id"])
                         if giver:
-                            try:
-                                await giver.send(
-                                    f"\N{HANDSHAKE} Handoff complete for **{item_name}**! "
-                                    f"Both sides confirmed. Thanks for your generosity."
+                            msg = (
+                                f"\N{HANDSHAKE} Hand over complete for **{item_name}**! "
+                                f"Thank you, this is your {_ordinal(new_total)} giveaway!"
+                            )
+                            if newly_earned:
+                                msg += (
+                                    f"\n\n\N{PARTY POPPER} **Congratulations!** "
+                                    f"You've earned the **{newly_earned}** role!"
                                 )
+                            try:
+                                await giver.send(msg)
                             except discord.Forbidden:
                                 pass
-                        await _complete_handoff(bot, claim, item, guild)
                         break
         else:
             await interaction.response.edit_message(
                 content=(
                     f"\N{WHITE HEAVY CHECK MARK} You confirmed receipt of **{item_name}**. "
-                    f"Waiting for the giver to confirm handoff."
+                    f"Waiting for the giver to confirm hand over."
                 ),
                 view=None,
             )
@@ -832,11 +1121,15 @@ class ManageSelectView(discord.ui.View):
         super().__init__(timeout=120)
         self.cog = cog
         self.select = discord.ui.Select(
-            placeholder="Select an item to mark as gone...",
+            placeholder="Remove item...",
             options=options,
         )
         self.select.callback = self.on_select
         self.add_item(self.select)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss_ephemeral(interaction)
 
     async def on_select(self, interaction: discord.Interaction):
         item_id = int(self.select.values[0])
@@ -844,7 +1137,7 @@ class ManageSelectView(discord.ui.View):
 
         if not item or item["status"] != "available":
             await interaction.response.edit_message(
-                content="That item is already gone.", view=None,
+                content="That item has already been removed.", view=None,
             )
             return
 
@@ -854,12 +1147,37 @@ class ManageSelectView(discord.ui.View):
             )
             return
 
-        # Snapshot pending claims before marking gone so we can notify them
-        pending = await db.get_pending_claims_for_item(self.cog.bot.db, item_id)
-
-        await db.mark_item_gone(self.cog.bot.db, item_id)
+        # Show confirm/cancel buttons before marking gone
+        view = ConfirmMarkGoneView(self.cog, item_id, item["item_name"])
         await interaction.response.edit_message(
-            content=f"**{item['item_name']}** marked as gone.",
+            content=f"Remove **{item['item_name']}** from the board?",
+            embed=None,
+            view=view,
+        )
+
+
+class ConfirmMarkGoneView(discord.ui.View):
+    def __init__(self, cog: "Giveaways", item_id: int, item_name: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.item_id = item_id
+        self.item_name = item_name
+
+    @discord.ui.button(label="Remove", style=discord.ButtonStyle.danger, emoji="\N{WASTEBASKET}")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await db.get_item(self.cog.bot.db, self.item_id)
+        if not item or item["status"] != "available":
+            await interaction.response.edit_message(
+                content="That item has already been removed.", view=None,
+            )
+            return
+
+        # Snapshot pending claims before marking gone so we can notify them
+        pending = await db.get_pending_claims_for_item(self.cog.bot.db, self.item_id)
+
+        await db.mark_item_gone(self.cog.bot.db, self.item_id)
+        await interaction.response.edit_message(
+            content=f"**{self.item_name}** removed from the board.",
             view=None,
         )
 
@@ -871,13 +1189,17 @@ class ManageSelectView(discord.ui.View):
                     if member:
                         try:
                             await member.send(
-                                f"\N{CROSS MARK} Your claim on **{item['item_name']}** "
+                                f"\N{CROSS MARK} Your claim on **{self.item_name}** "
                                 f"was declined -- the item is no longer available."
                             )
                         except discord.Forbidden:
                             pass
                 await refresh_board(self.cog.bot, guild)
                 break
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss_ephemeral(interaction)
 
 
 # -- Cog ----------------------------------------------------------------------
@@ -916,39 +1238,30 @@ async def setup(bot: commands.Bot):
 
     # Register dynamic items for persistence across restarts
     bot.add_dynamic_items(
-        GiveButton, ClaimButton, MyItemsButton,
+        GiveButton, ClaimButton, MyItemsButton, MyClaimsButton,
         AcceptClaimButton, DeclineClaimButton,
         ConfirmGivenButton, ConfirmReceivedButton,
+        DismissDMButton,
     )
 
     cog = Giveaways(bot)
     await bot.add_cog(cog)
 
     @lance.command(name="give", description="List item(s) on the giveaway board")
-    @app_commands.describe(
-        items="Item name(s), comma-separated for multiple",
-        quantity="How many of each (default 1)",
-    )
-    async def give(interaction: discord.Interaction, items: str, quantity: int = 1):
-        if quantity < 1:
-            await interaction.response.send_message(
-                "Quantity must be at least 1.", ephemeral=True,
-            )
-            return
-
+    @app_commands.describe(items="Item name(s), comma-separated for multiple")
+    async def give(interaction: discord.Interaction, items: str):
         names = [n.strip() for n in items.split(",") if n.strip()]
         if not names:
             await interaction.response.send_message("Item name can't be empty.", ephemeral=True)
             return
 
         for name in names:
-            await db.create_item(bot.db, interaction.guild_id, interaction.user.id, name, quantity)
+            await db.create_item(bot.db, interaction.guild_id, interaction.user.id, name)
 
-        qty_str = f" x{quantity}" if quantity > 1 else ""
         if len(names) == 1:
-            summary = f"**{names[0]}{qty_str}**"
+            summary = f"**{names[0]}**"
         else:
-            summary = ", ".join(f"**{n}{qty_str}**" for n in names)
+            summary = ", ".join(f"**{n}**" for n in names)
         await interaction.response.send_message(
             f"Listed {summary} on the giveaway board!",
             ephemeral=True,

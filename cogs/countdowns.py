@@ -32,8 +32,12 @@ def _build_countdown_embed(countdown) -> discord.Embed:
         ),
         color=discord.Color.dark_grey() if past else discord.Color.blue(),
     )
-    embed.set_footer(text=f"{config.BOT_NAME} -- {countdown['name']}")
+    embed.set_footer(text=f"{countdown['name']} countdown")
     return embed
+
+
+def _is_admin(interaction: discord.Interaction) -> bool:
+    return interaction.permissions.manage_channels
 
 
 # -- Modals -------------------------------------------------------------------
@@ -81,6 +85,7 @@ class CreateCountdownModal(discord.ui.Modal, title="Create Countdown"):
                 "TIMEZONE": user_tz,
                 "TO_TIMEZONE": "UTC",
                 "RETURN_AS_TIMEZONE_AWARE": True,
+                "PREFER_DATES_FROM": "future",
             },
         )
         if parsed is None:
@@ -110,20 +115,50 @@ class CreateCountdownModal(discord.ui.Modal, title="Create Countdown"):
 # -- Views --------------------------------------------------------------------
 
 
-class CountdownSelectView(discord.ui.View):
-    """Ephemeral select menu for viewing a countdown."""
+class CountdownPanelView(discord.ui.View):
+    """Ephemeral panel shown by /lance countdown. Browse + admin buttons."""
 
-    def __init__(self, bot: commands.Bot, options: list[discord.SelectOption]):
-        super().__init__(timeout=60)
+    def __init__(
+        self, bot: commands.Bot,
+        countdowns: list,
+        is_admin: bool,
+    ):
+        super().__init__(timeout=120)
         self.bot = bot
-        self.select = discord.ui.Select(
-            placeholder="Pick a countdown...",
-            options=options,
-        )
-        self.select.callback = self.on_select
-        self.add_item(self.select)
 
-    async def on_select(self, interaction: discord.Interaction):
+        # Add select menu if there are countdowns to show
+        if countdowns:
+            options = [
+                discord.SelectOption(label=cd["label"], value=cd["name"])
+                for cd in countdowns[:25]
+            ]
+            self.select = discord.ui.Select(
+                placeholder="Pick a countdown to post...",
+                options=options,
+            )
+            self.select.callback = self._on_select
+            self.add_item(self.select)
+
+        # Admin buttons
+        if is_admin:
+            create_btn = discord.ui.Button(
+                label="Create New",
+                style=discord.ButtonStyle.green,
+                emoji="\N{HEAVY PLUS SIGN}",
+            )
+            create_btn.callback = self._on_create
+            self.add_item(create_btn)
+
+            if countdowns:
+                delete_btn = discord.ui.Button(
+                    label="Delete",
+                    style=discord.ButtonStyle.danger,
+                    emoji="\N{WASTEBASKET}",
+                )
+                delete_btn.callback = self._on_delete
+                self.add_item(delete_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
         name = self.select.values[0]
         cd = await db.get_countdown(self.bot.db, interaction.guild_id, name)
         if cd is None:
@@ -132,9 +167,37 @@ class CountdownSelectView(discord.ui.View):
             )
             return
         embed = _build_countdown_embed(cd)
-        # Post publicly so others can see it
-        await interaction.response.edit_message(content=None, view=None)
+        await interaction.response.edit_message(
+            content="Posted!", embed=None, view=None,
+        )
         await interaction.followup.send(embed=embed)
+
+    async def _on_create(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(CreateCountdownModal(self.bot))
+
+    async def _on_delete(self, interaction: discord.Interaction):
+        all_countdowns = await db.get_all_countdowns(
+            self.bot.db, interaction.guild_id,
+        )
+        if not all_countdowns:
+            await interaction.response.edit_message(
+                content="No countdowns to delete.", view=None,
+            )
+            return
+
+        options = [
+            discord.SelectOption(
+                label=f"{cd['name']} -- {cd['label']}",
+                value=cd["name"],
+            )
+            for cd in all_countdowns[:25]
+        ]
+        view = DeleteCountdownView(self.bot, options)
+        await interaction.response.edit_message(
+            content="Select a countdown to delete:",
+            embed=None,
+            view=view,
+        )
 
 
 class DeleteCountdownView(discord.ui.View):
@@ -169,80 +232,62 @@ class DeleteCountdownView(discord.ui.View):
 async def setup(bot: commands.Bot):
     from cogs import lance
 
-    @lance.command(name="countdown", description="Show an event countdown timer")
+    @lance.command(name="countdown", description="View or manage event countdown timers")
     @app_commands.describe(name="Countdown name (omit to browse)")
     async def countdown(interaction: discord.Interaction, name: str | None = None):
-        all_countdowns = await db.get_all_countdowns(bot.db, interaction.guild_id)
-
-        if not all_countdowns:
-            await interaction.response.send_message(
-                "No countdowns configured. An admin can create one with "
-                "`/lance countdown-create`.",
-                ephemeral=True,
-            )
-            return
-
+        # Direct lookup by name -- post publicly
         if name is not None:
             cd = await db.get_countdown(bot.db, interaction.guild_id, name)
             if cd is None:
-                names = ", ".join(f"`{c['name']}`" for c in all_countdowns)
-                await interaction.response.send_message(
-                    f"No countdown named `{name}`. Available: {names}",
-                    ephemeral=True,
+                all_countdowns = await db.get_all_countdowns(
+                    bot.db, interaction.guild_id,
                 )
+                if all_countdowns:
+                    names = ", ".join(f"`{c['name']}`" for c in all_countdowns)
+                    await interaction.response.send_message(
+                        f"No countdown named `{name}`. Available: {names}",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "No countdowns configured.", ephemeral=True,
+                    )
                 return
             embed = _build_countdown_embed(cd)
             await interaction.response.send_message(embed=embed)
             return
 
-        # No name given
-        if len(all_countdowns) == 1:
+        # No name -- show the panel
+        all_countdowns = await db.get_all_countdowns(bot.db, interaction.guild_id)
+        admin = _is_admin(interaction)
+
+        # Single countdown, non-admin -- just post it
+        if len(all_countdowns) == 1 and not admin:
             embed = _build_countdown_embed(all_countdowns[0])
             await interaction.response.send_message(embed=embed)
             return
 
-        # Multiple -- show a select menu
-        options = [
-            discord.SelectOption(
-                label=cd["label"],
-                value=cd["name"],
-            )
-            for cd in all_countdowns[:25]
-        ]
-        view = CountdownSelectView(bot, options)
-        await interaction.response.send_message(
-            "Which countdown?", view=view, ephemeral=True,
-        )
-
-    @lance.command(
-        name="countdown-create",
-        description="Create or update an event countdown (admin)",
-    )
-    @app_commands.checks.has_permissions(manage_channels=True)
-    async def countdown_create(interaction: discord.Interaction):
-        await interaction.response.send_modal(CreateCountdownModal(bot))
-
-    @lance.command(
-        name="countdown-delete",
-        description="Delete an event countdown (admin)",
-    )
-    @app_commands.checks.has_permissions(manage_channels=True)
-    async def countdown_delete(interaction: discord.Interaction):
-        all_countdowns = await db.get_all_countdowns(bot.db, interaction.guild_id)
-        if not all_countdowns:
+        if not all_countdowns and not admin:
             await interaction.response.send_message(
-                "No countdowns to delete.", ephemeral=True,
+                "No countdowns configured.", ephemeral=True,
             )
             return
 
-        options = [
-            discord.SelectOption(
-                label=f"{cd['name']} -- {cd['label']}",
-                value=cd["name"],
-            )
-            for cd in all_countdowns[:25]
-        ]
-        view = DeleteCountdownView(bot, options)
+        # Build panel embed summarising active countdowns
+        embed = discord.Embed(
+            title="\N{STOPWATCH} Countdowns",
+            color=discord.Color.blue(),
+        )
+        if all_countdowns:
+            lines = [
+                f"**{cd['label']}** -- <t:{cd['timestamp']}:R>"
+                for cd in all_countdowns
+            ]
+            embed.description = "\n".join(lines)
+        else:
+            embed.description = "No countdowns configured yet."
+
+        view = CountdownPanelView(bot, all_countdowns, admin)
         await interaction.response.send_message(
-            "Select a countdown to delete:", view=view, ephemeral=True,
+            embed=embed, view=view, ephemeral=True,
         )

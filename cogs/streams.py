@@ -31,6 +31,13 @@ class Streams(commands.Cog):
                 return role
         return None
 
+    def _get_playing_activity(self, member: discord.Member) -> str | None:
+        """Return the name of the game/app the member is playing, if any."""
+        for activity in member.activities:
+            if activity.type == discord.ActivityType.playing and activity.name:
+                return activity.name
+        return None
+
     async def _create_vc_invite(self, channel: discord.VoiceChannel) -> str | None:
         try:
             invite = await channel.create_invite(max_age=0, max_uses=0, unique=False)
@@ -76,18 +83,25 @@ class Streams(commands.Cog):
         vc = state.channel
         invite_url = await self._create_vc_invite(vc)
 
+        game = self._get_playing_activity(member)
+        if game:
+            description = (
+                f"**{member.display_name}** is now streaming **{game}** in **{vc.name}**"
+            )
+        else:
+            description = (
+                f"**{member.display_name}** is now streaming in **{vc.name}**"
+            )
+
         embed = discord.Embed(
             title="Someone went live!",
-            description=(
-                f"**{member.display_name}** is now streaming in **{vc.name}**"
-            ),
+            description=description,
             color=discord.Color.purple(),
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         if invite_url:
-            embed.add_field(name="Join", value=f"[Click to join voice]({invite_url})", inline=False)
-        embed.set_footer(text=config.BOT_NAME)
+            embed.description += f"\n\n[Click to join channel]({invite_url})"
 
         role = self._get_stream_role(guild)
         role_ping = role.mention if role else ""
@@ -112,7 +126,6 @@ class Streams(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text=config.BOT_NAME)
 
         try:
             await msg.edit(content="", embed=embed)

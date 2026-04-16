@@ -127,9 +127,11 @@ class EmbarkModal(discord.ui.Modal, title="Set Embark ID"):
         max_length=64,
     )
 
-    def __init__(self, cog: "Profiles"):
+    def __init__(self, cog: "Profiles", current: str | None = None):
         super().__init__()
         self.cog = cog
+        if current:
+            self.embark_id.default = current
 
     async def on_submit(self, interaction: discord.Interaction):
         await db.set_embark_id(self.cog.bot.db, interaction.user.id, self.embark_id.value.strip())
@@ -140,15 +142,17 @@ class EmbarkModal(discord.ui.Modal, title="Set Embark ID"):
 
 class TimezoneModal(discord.ui.Modal, title="Set Timezone"):
     timezone: discord.ui.TextInput = discord.ui.TextInput(
-        label="Timezone",
+        label="Timezone (find yours at zones.arilyn.cc)",
         placeholder="e.g. Europe/Amsterdam, CET, PST",
         required=True,
         max_length=64,
     )
 
-    def __init__(self, cog: "Profiles"):
+    def __init__(self, cog: "Profiles", current: str | None = None):
         super().__init__()
         self.cog = cog
+        if current:
+            self.timezone.default = current
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -180,11 +184,15 @@ class SettingsView(discord.ui.View):
 
     @discord.ui.button(label="Set Embark ID", style=discord.ButtonStyle.primary, emoji="\N{VIDEO GAME}")
     async def set_embark(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(EmbarkModal(self.cog))
+        profile = await db.get_profile(self.cog.bot.db, interaction.user.id)
+        current = profile["embark_id"] if profile else None
+        await interaction.response.send_modal(EmbarkModal(self.cog, current))
 
-    @discord.ui.button(label="Set Timezone", style=discord.ButtonStyle.primary, emoji="\N{CLOCK FACE THREE OCLOCK}")
+    @discord.ui.button(label="Set Timezone", style=discord.ButtonStyle.primary, emoji="\N{MANTELPIECE CLOCK}")
     async def set_timezone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TimezoneModal(self.cog))
+        profile = await db.get_profile(self.cog.bot.db, interaction.user.id)
+        current = profile["timezone"] if profile else None
+        await interaction.response.send_modal(TimezoneModal(self.cog, current))
 
     @discord.ui.button(label="Clear All", style=discord.ButtonStyle.danger, emoji="\N{WASTEBASKET}")
     async def clear_all(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -216,8 +224,7 @@ class Profiles(commands.Cog):
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="\N{VIDEO GAME} Embark ID", value=embark_id, inline=False)
-        embed.add_field(name="\N{CLOCK FACE THREE OCLOCK} Timezone", value=timezone, inline=False)
-        embed.set_footer(text=config.BOT_NAME)
+        embed.add_field(name="\N{MANTELPIECE CLOCK} Timezone", value=timezone, inline=False)
         return embed
 
     async def build_settings_embed(self, user: discord.abc.User) -> discord.Embed:
@@ -226,23 +233,23 @@ class Profiles(commands.Cog):
         timezone = profile["timezone"] if profile and profile["timezone"] else "*not set*"
 
         embed = discord.Embed(
-            title="Your Lance settings",
+            title="Your profile settings",
             description=(
                 "These settings are tied to your Discord account and shared "
-                "across all servers where Lance lives."
+                "across all servers."
             ),
             color=discord.Color.blurple(),
         )
         embed.add_field(name="\N{VIDEO GAME} Embark ID", value=embark_id, inline=False)
         embed.add_field(
-            name="\N{CLOCK FACE THREE OCLOCK} Timezone",
+            name="\N{MANTELPIECE CLOCK} Timezone",
             value=(
                 f"{timezone}\n"
                 f"-# Don't know yours? [Find your timezone]({config.TIMEZONE_HELPER_URL})"
             ),
             inline=False,
         )
-        embed.set_footer(text=f"{config.BOT_NAME} - settings are private to you")
+        embed.set_footer(text="Settings are private to you")
         return embed
 
 
@@ -254,6 +261,8 @@ async def setup(bot: commands.Bot):
 
     @lance.command(name="help", description="Show all Lance commands and features")
     async def help_cmd(interaction: discord.Interaction):
+        is_admin = interaction.permissions.manage_channels
+
         embed = discord.Embed(
             title=f"{config.BOT_NAME} -- Commands & Features",
             color=discord.Color.blurple(),
@@ -261,52 +270,68 @@ async def setup(bot: commands.Bot):
         embed.add_field(
             name="\N{VIDEO GAME} Profile",
             value=(
-                "`/lance settings` -- Set your Embark ID and timezone\n"
-                "`/lance profile @user` -- View someone's profile\n"
-                "Right-click a user -> **Apps** -> **View Profile**"
+                "`/lance settings` -- Set your Embark ID and timezone, or use the buttons below this message\n"
+                "`/lance profile @user` -- View someone's profile, "
+                "or Right-click username -> **Apps** -> **View Profile**"
             ),
             inline=False,
         )
         embed.add_field(
-            name="\N{CLOCK FACE THREE OCLOCK} Time Conversion",
+            name="\N{MANTELPIECE CLOCK} Time Conversion",
             value=(
-                "React to any message with the clock emoji to get all "
+                "React to any message with \N{MANTELPIECE CLOCK} (`:clock:`) to get all "
                 "times converted to your timezone via DM.\n"
                 "-# Both you and the message author need a timezone set "
                 "in `/lance settings`."
             ),
             inline=False,
         )
+
+        giveaways_lines = [
+            "`/lance give Item One, Item Two` -- List items (comma-separated)",
+        ]
+        board = await db.get_giveaway_board(cog.bot.db, interaction.guild_id)
+        if board is not None:
+            giveaways_lines.append(
+                f"Use the **Add New Item**, **Claim an item**, **My Giveaways**, and **My Claims** buttons in <#{board['channel_id']}>."
+            )
+        if is_admin:
+            giveaways_lines.append("`/lance giveaway-setup` -- Post the board (admin only)")
         embed.add_field(
             name="\N{PACKAGE} Giveaways",
-            value=(
-                "`/lance give Item One, Item Two` -- List items (comma-separated)\n"
-                "Use the **Give Item**, **Claim**, and **My Items** buttons on the board.\n"
-                "`/lance giveaway-setup` -- Post the board (admin only)"
-            ),
+            value="\n".join(giveaways_lines),
             inline=False,
         )
+
+        countdown_lines = [
+            "`/lance countdown` -- Browse and post countdown timers",
+        ]
+        if is_admin:
+            countdown_lines.append("`/lance countdown name` -- Post a specific countdown")
+            countdown_lines.append("-# Admins see Create and Delete buttons in the panel.")
         embed.add_field(
             name="\N{STOPWATCH} Countdowns",
-            value=(
-                "`/lance countdown` -- Show event countdown timers\n"
-                "`/lance countdown name` -- Show a specific countdown\n"
-                "`/lance countdown-create` -- Create a countdown (admin only)"
-            ),
+            value="\n".join(countdown_lines),
             inline=False,
+        )
+        stream_channel = discord.utils.get(
+            interaction.guild.text_channels, name=config.STREAM_CHANNEL_NAME,
+        )
+        stream_ref = (
+            f"<#{stream_channel.id}>" if stream_channel else f"#{config.STREAM_CHANNEL_NAME}"
         )
         embed.add_field(
             name="\N{TELEVISION} Stream Alerts",
             value=(
-                "Start streaming in a voice channel and Lance will "
-                "automatically announce it. No commands needed."
+                f"Start streaming in a voice channel and Lance will "
+                f"automatically announce it in {stream_ref}."
             ),
             inline=False,
         )
-        embed.set_footer(text=config.BOT_NAME)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = SettingsView(cog, interaction.user.id)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @lance.command(name="settings", description="View or change your Lance settings")
+    @lance.command(name="settings", description="View or edit your profile settings")
     async def settings(interaction: discord.Interaction):
         embed = await cog.build_settings_embed(interaction.user)
         view = SettingsView(cog, interaction.user.id)

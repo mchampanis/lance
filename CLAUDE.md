@@ -38,9 +38,7 @@ All user-facing commands live under the `/lance` group, defined in `cogs/__init_
 - `/lance profile @user` (profiles cog)
 - `/lance give` (giveaways cog)
 - `/lance giveaway-setup` (giveaways cog, admin only)
-- `/lance countdown [name]` (countdowns cog)
-- `/lance countdown-create` (countdowns cog, admin only)
-- `/lance countdown-delete` (countdowns cog, admin only)
+- `/lance countdown [name]` (countdowns cog; admins see Create/Delete buttons)
 - **View Profile** context menu (right-click a user -> Apps; profiles cog)
 
 The streams and timeconvert cogs are purely event-driven (no slash commands).
@@ -56,7 +54,7 @@ The streams and timeconvert cogs are purely event-driven (no slash commands).
 ## Required Intents
 
 - Members (privileged; for member cache population)
-- Presences (privileged; enabled but may not be needed -- see Notes)
+- Presences (privileged; required for detecting the game being streamed)
 - Message Content (privileged; for reading message text in time conversion reactions)
 - Voice States (for `on_voice_state_update` and `self_stream`; included in `Intents.default()`)
 
@@ -64,5 +62,5 @@ The streams and timeconvert cogs are purely event-driven (no slash commands).
 
 - The Presences intent is privileged and must be enabled in the Discord Developer Portal under Bot -> Privileged Gateway Intents.
 - Members intent is also privileged and must be enabled there.
-- Stream detection relies on `VoiceState.self_stream` from the `VOICE_STATE_UPDATE` gateway event, which requires the Voice States intent (included in `Intents.default()`). The Presences intent is enabled but not used by the streams cog -- it may be droppable, but needs testing first.
+- Stream detection relies on `VoiceState.self_stream` from the `VOICE_STATE_UPDATE` gateway event, which requires the Voice States intent (included in `Intents.default()`). The Presences intent is used to read `member.activities` and show the game name in stream announcements.
 - In-memory `active_streams` dict is lost on bot restart. Any streams active at restart time will never get their "stream ended" edit.

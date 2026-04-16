@@ -7,7 +7,7 @@
 3. Go to **Bot** in the left sidebar
 4. Click **Reset Token** and copy the token -- this is your `BOT_TOKEN`
 5. Under **Privileged Gateway Intents**, enable:
-   - **Presence Intent** (enabled; may be droppable -- see CLAUDE.md notes)
+   - **Presence Intent** (required for showing the game name in stream announcements)
    - **Server Members Intent** (required for member lookup)
    - **Message Content Intent** (required for reading message text in time conversion)
 

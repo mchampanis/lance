@@ -20,11 +20,11 @@ STREAM_ROLE_NAME = os.environ.get("STREAM_ROLE_NAME", "LFG Stream")
 # Timezone helper page (linked from /lance settings)
 TIMEZONE_HELPER_URL = os.environ.get(
     "TIMEZONE_HELPER_URL",
-    "https://guides.firstwavesurvivors.com/tools/timezone",
+    "https://zones.arilyn.cc/",
 )
 
 # Time conversion reaction trigger emoji (Unicode name or custom emoji string)
-TIME_REACT_EMOJI = os.environ.get("TIME_REACT_EMOJI", "\N{CLOCK FACE THREE OCLOCK}")
+TIME_REACT_EMOJI = os.environ.get("TIME_REACT_EMOJI", "\N{MANTELPIECE CLOCK}")
 
 # Giveaways
 GIVEAWAY_EXPIRY_HOURS = int(os.environ.get("GIVEAWAY_EXPIRY_HOURS", "120"))
@@ -32,11 +32,11 @@ GIVEAWAY_EXPIRY_HOURS = int(os.environ.get("GIVEAWAY_EXPIRY_HOURS", "120"))
 # Milestone roles: "count:Role Name,count:Role Name,..."
 # Roles must already exist in the guild. Bot awards highest earned, removes lower ones.
 _DEFAULT_MILESTONES = (
-    "1:Freebie Giver,"
-    "5:Freebie Apprentice,"
-    "10:Freebie Enthusiast,"
-    "50:Freebie Champion,"
-    "100:Freebie Master"
+    "1:Giveaway Newbie,"
+    "5:Giveaway Enthusiast,"
+    "10:Giveaway Pro,"
+    "50:Giveaway Champion,"
+    "100:Giveaway Master"
 )
 GIVEAWAY_MILESTONES: list[tuple[int, str]] = []
 for _entry in os.environ.get("GIVEAWAY_MILESTONES", _DEFAULT_MILESTONES).split(","):
@@ -45,6 +45,9 @@ for _entry in os.environ.get("GIVEAWAY_MILESTONES", _DEFAULT_MILESTONES).split("
         _count, _name = _entry.split(":", 1)
         GIVEAWAY_MILESTONES.append((int(_count.strip()), _name.strip()))
 GIVEAWAY_MILESTONES.sort(key=lambda m: m[0])
+
+# Testing mode (disables self-claim guard)
+TESTING = os.environ.get("TESTING", "").lower() in ("1", "true", "yes")
 
 # Healthchecks.io ping URL (optional)
 HEALTHCHECK_URL = os.environ.get("HEALTHCHECK_URL")

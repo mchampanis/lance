@@ -218,7 +218,7 @@ async def get_item(db: aiosqlite.Connection, item_id: int) -> aiosqlite.Row | No
 
 async def get_available_items(db: aiosqlite.Connection, guild_id: int) -> list[aiosqlite.Row]:
     async with db.execute(
-        "SELECT * FROM giveaway_items WHERE guild_id = ? AND status = 'available' ORDER BY created_at DESC",
+        "SELECT * FROM giveaway_items WHERE guild_id = ? AND status = 'available' ORDER BY created_at ASC",
         (guild_id,),
     ) as cur:
         return await cur.fetchall()
@@ -226,7 +226,7 @@ async def get_available_items(db: aiosqlite.Connection, guild_id: int) -> list[a
 
 async def get_user_items(db: aiosqlite.Connection, guild_id: int, user_id: int) -> list[aiosqlite.Row]:
     async with db.execute(
-        "SELECT * FROM giveaway_items WHERE guild_id = ? AND user_id = ? AND status = 'available' ORDER BY created_at DESC",
+        "SELECT * FROM giveaway_items WHERE guild_id = ? AND user_id = ? AND status = 'available' ORDER BY created_at ASC",
         (guild_id, user_id),
     ) as cur:
         return await cur.fetchall()
@@ -333,6 +333,22 @@ async def get_accepted_claims_for_item(db: aiosqlite.Connection, item_id: int) -
     async with db.execute(
         "SELECT * FROM giveaway_claims WHERE item_id = ? AND status = 'accepted' ORDER BY created_at",
         (item_id,),
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def get_user_pending_claims(
+    db: aiosqlite.Connection, guild_id: int, claimer_id: int,
+) -> list[aiosqlite.Row]:
+    """Return all pending claims by this user in the given guild."""
+    async with db.execute(
+        """
+        SELECT c.* FROM giveaway_claims c
+        JOIN giveaway_items i ON i.id = c.item_id
+        WHERE i.guild_id = ? AND c.claimer_id = ? AND c.status = 'pending'
+        ORDER BY c.created_at
+        """,
+        (guild_id, claimer_id),
     ) as cur:
         return await cur.fetchall()
 
@@ -481,7 +497,7 @@ async def create_countdown(
             timestamp = excluded.timestamp,
             created_by = excluded.created_by
         """,
-        (guild_id, _normalize_countdown_name(name), label, timestamp, created_by),
+        (guild_id, normalize_countdown_name(name), label, timestamp, created_by),
     )
     await db.commit()
 
@@ -491,7 +507,7 @@ async def get_countdown(
 ) -> aiosqlite.Row | None:
     async with db.execute(
         "SELECT * FROM countdowns WHERE guild_id = ? AND name = ?",
-        (guild_id, _normalize_countdown_name(name)),
+        (guild_id, normalize_countdown_name(name)),
     ) as cur:
         return await cur.fetchone()
 
@@ -511,7 +527,7 @@ async def delete_countdown(
 ) -> bool:
     cur = await db.execute(
         "DELETE FROM countdowns WHERE guild_id = ? AND name = ?",
-        (guild_id, _normalize_countdown_name(name)),
+        (guild_id, normalize_countdown_name(name)),
     )
     await db.commit()
     return cur.rowcount > 0

@@ -149,7 +149,7 @@ class TimeConvert(commands.Cog):
             icon_url=message.author.display_avatar.url,
         )
         embed.set_footer(
-            text=f"{source_tz} -> {target_tz} | {config.BOT_NAME}",
+            text=f"{source_tz} -> {target_tz}",
         )
 
         try:
