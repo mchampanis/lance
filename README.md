@@ -25,7 +25,7 @@ uv run python bot.py
 
 ## Deployment
 
-Deployed to Fly.io. See [FLY-DEPLOY.md](FLY-DEPLOY.md) for details. Pushes to `main` auto-deploy via GitHub Actions.
+Deployed to Fly.io. See [FLY-DEPLOY.md](FLY-DEPLOY.md) for details.
 
 ## Configuration
 

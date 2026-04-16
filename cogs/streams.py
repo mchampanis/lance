@@ -106,7 +106,20 @@ class Streams(commands.Cog):
         role = self._get_stream_role(guild)
         role_ping = role.mention if role else ""
 
-        msg = await channel.send(content=role_ping, embed=embed)
+        try:
+            msg = await channel.send(content=role_ping, embed=embed)
+        except discord.Forbidden:
+            log.warning(
+                "Missing permissions to post in #%s (guild %s)",
+                channel.name, guild.name,
+            )
+            return
+        except discord.HTTPException as e:
+            log.warning(
+                "Failed to post stream announcement in #%s (guild %s): %s",
+                channel.name, guild.name, e,
+            )
+            return
 
         self.active_streams.setdefault(guild.id, {})[member.id] = msg
         log.info("Stream started: %s in %s (#%s)", member, vc.name, guild.name)

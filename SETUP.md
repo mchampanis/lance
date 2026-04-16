@@ -16,10 +16,11 @@
 Use this OAuth2 URL, replacing `APPLICATION_ID` with your Application ID (found on the **General Information** page):
 
 ```
-https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot&permissions=268519425
+https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot&permissions=268520449
 ```
 
 This grants the bot these permissions:
+- View Channels
 - Create Instant Invite (for VC join links)
 - Send Messages
 - Embed Links

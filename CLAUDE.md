@@ -45,6 +45,7 @@ The streams and timeconvert cogs are purely event-driven (no slash commands).
 
 ## Required Discord Bot Permissions
 
+- View Channels
 - Send Messages
 - Embed Links
 - Create Instant Invite (for VC join links)

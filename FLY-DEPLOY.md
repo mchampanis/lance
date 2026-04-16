@@ -22,9 +22,17 @@ fly secrets set GUILD_IDS="id1,id2"
 
 ### 3. Deploy
 
-```bash
-fly deploy
+```powershell
+./run.ps1 deploy
 ```
+
+This writes the current git short SHA to a `COMMIT` file (copied into the image) and runs `fly deploy`. To verify which SHA is running on the Fly machine afterwards:
+
+```powershell
+./run.ps1 'deploy:check'
+```
+
+(Quotes are required around `deploy:check` in PowerShell because of the colon.)
 
 ## Configuration
 
@@ -51,14 +59,6 @@ Non-secret config can go in `fly.toml` under `[env]` if needed. Secrets are set 
 - **Auto-restart** -- if the bot crashes, Fly restarts it automatically.
 - **`load_dotenv()`** is a no-op when no `.env` file exists. Fly secrets are already env vars.
 
-## CI/CD
-
-The GitHub Actions workflow at `.github/workflows/fly-deploy.yml` deploys on every push to `main`. To set it up:
-
-1. Get a Fly API token: `fly tokens create deploy -x 999999h`
-2. Add it as a GitHub repository secret named `FLY_API_TOKEN` at:
-   `https://github.com/mchampanis/lance/settings/secrets/actions`
-
 ## Monitoring
 
 Set `HEALTHCHECK_URL` to a [Healthchecks.io](https://healthchecks.io) ping URL to get notified if the bot goes down. The bot pings every 5 minutes. Recommended HC schedule: 10-minute period, 10-minute grace.
@@ -78,9 +78,13 @@ Logs are also available in the Fly dashboard at https://fly.io/apps/lance/monito
 
 ## Useful Commands
 
+```powershell
+./run.ps1 deploy            # Deploy latest changes (writes COMMIT, then fly deploy)
+./run.ps1 'deploy:check'    # Check which git SHA is running on the Fly machine
+```
+
 ```bash
 fly status              # Check app status
-fly deploy              # Deploy latest changes
 fly ssh console         # SSH into the machine
 fly secrets list        # List set secrets
 fly secrets set K=V     # Set a secret

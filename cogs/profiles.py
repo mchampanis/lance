@@ -296,7 +296,7 @@ async def setup(bot: commands.Bot):
                 f"Use the **Add New Item**, **Claim an item**, **My Giveaways**, and **My Claims** buttons in <#{board['channel_id']}>."
             )
         if is_admin:
-            giveaways_lines.append("`/lance giveaway-setup` -- Post the board (admin only)")
+            giveaways_lines.append("`/lance giveaway-setup` -- Post the board (Mod only)")
         embed.add_field(
             name="\N{PACKAGE} Giveaways",
             value="\n".join(giveaways_lines),
@@ -308,7 +308,7 @@ async def setup(bot: commands.Bot):
         ]
         if is_admin:
             countdown_lines.append("`/lance countdown name` -- Post a specific countdown")
-            countdown_lines.append("-# Admins see Create and Delete buttons in the panel.")
+            countdown_lines.append("-# Mods see Create and Delete buttons in the panel.")
         embed.add_field(
             name="\N{STOPWATCH} Countdowns",
             value="\n".join(countdown_lines),
