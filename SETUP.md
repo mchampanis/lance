@@ -16,7 +16,7 @@
 Use this OAuth2 URL, replacing `APPLICATION_ID` with your Application ID (found on the **General Information** page):
 
 ```
-https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot&permissions=268520449
+https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot+applications.commands&permissions=268520513
 ```
 
 This grants the bot these permissions:
@@ -24,6 +24,7 @@ This grants the bot these permissions:
 - Create Instant Invite (for VC join links)
 - Send Messages
 - Embed Links
+- Add Reactions
 - Read Message History
 - Manage Roles (for giveaway milestone role awards)
 

@@ -49,6 +49,7 @@ The streams and timeconvert cogs are purely event-driven (no slash commands).
 - Send Messages
 - Embed Links
 - Create Instant Invite (for VC join links)
+- Add Reactions
 - Read Message History
 - Manage Roles (for giveaway milestone role awards)
 
