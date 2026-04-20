@@ -33,11 +33,11 @@ This grants the bot these permissions:
 Create a role called **LFG Stream** (or whatever you set `STREAM_ROLE_NAME` to). Members who want stream notifications should self-assign this role.
 
 Create the giveaway milestone roles (the bot awards these automatically but can't create them):
-- **Freebie Giver** (1 item given)
-- **Freebie Apprentice** (5 items)
-- **Freebie Enthusiast** (10 items)
-- **Freebie Champion** (50 items)
-- **Freebie Master** (100 items)
+- **Giveaway Newbie** (1 item given)
+- **Giveaway Enthusiast** (5 items)
+- **Giveaway Pro** (10 items)
+- **Giveaway Champion** (50 items)
+- **Giveaway Master** (100 items)
 
 Make sure the bot's role is **above** the milestone roles in the role hierarchy, otherwise it can't assign them. Role names are configurable via `GIVEAWAY_MILESTONES`.
 

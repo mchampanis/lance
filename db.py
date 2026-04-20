@@ -457,15 +457,6 @@ async def increment_items_given(db: aiosqlite.Connection, guild_id: int, user_id
     return row["items_given"]
 
 
-async def get_items_given(db: aiosqlite.Connection, guild_id: int, user_id: int) -> int:
-    async with db.execute(
-        "SELECT items_given FROM giveaway_stats WHERE guild_id = ? AND user_id = ?",
-        (guild_id, user_id),
-    ) as cur:
-        row = await cur.fetchone()
-    return row["items_given"] if row else 0
-
-
 # -- Countdowns ----------------------------------------------------------------
 
 

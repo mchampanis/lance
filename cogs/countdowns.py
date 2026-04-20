@@ -17,6 +17,7 @@ import config
 import db
 
 log = logging.getLogger("lance.countdowns")
+MAX_SELECT_OPTIONS = 25
 
 
 def _build_countdown_embed(countdown) -> discord.Embed:
@@ -122,19 +123,19 @@ class CountdownPanelView(discord.ui.View):
         self, bot: commands.Bot,
         countdowns: list,
         is_admin: bool,
+        page: int = 0,
     ):
         super().__init__(timeout=120)
         self.bot = bot
+        self.countdowns = countdowns
+        self.page = page
+        self.is_admin = is_admin
 
         # Add select menu if there are countdowns to show
         if countdowns:
-            options = [
-                discord.SelectOption(label=cd["label"], value=cd["name"])
-                for cd in countdowns[:25]
-            ]
             self.select = discord.ui.Select(
                 placeholder="Pick a countdown to post...",
-                options=options,
+                options=[],
             )
             self.select.callback = self._on_select
             self.add_item(self.select)
@@ -157,6 +158,47 @@ class CountdownPanelView(discord.ui.View):
                 )
                 delete_btn.callback = self._on_delete
                 self.add_item(delete_btn)
+
+        self._sync_page()
+
+    def _sync_page(self) -> None:
+        if not self.countdowns:
+            self.prev_page.disabled = True
+            self.next_page.disabled = True
+            return
+
+        start = self.page * MAX_SELECT_OPTIONS
+        end = start + MAX_SELECT_OPTIONS
+        page_count = max(1, (len(self.countdowns) + MAX_SELECT_OPTIONS - 1) // MAX_SELECT_OPTIONS)
+
+        self.select.options = [
+            discord.SelectOption(label=cd["label"], value=cd["name"])
+            for cd in self.countdowns[start:end]
+        ]
+        self.select.placeholder = f"Pick a countdown to post... ({start + 1}-{min(end, len(self.countdowns))} of {len(self.countdowns)})"
+        self.prev_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= page_count - 1
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="\N{STOPWATCH} Countdowns",
+            color=discord.Color.blue(),
+        )
+        if not self.countdowns:
+            embed.description = "No countdowns configured yet."
+            return embed
+
+        start = self.page * MAX_SELECT_OPTIONS
+        end = start + MAX_SELECT_OPTIONS
+        page_count = max(1, (len(self.countdowns) + MAX_SELECT_OPTIONS - 1) // MAX_SELECT_OPTIONS)
+        lines = [
+            f"**{cd['label']}** -- <t:{cd['timestamp']}:R>"
+            for cd in self.countdowns[start:end]
+        ]
+        embed.description = "\n".join(lines)
+        if page_count > 1:
+            embed.set_footer(text=f"Page {self.page + 1}/{page_count}")
+        return embed
 
     async def _on_select(self, interaction: discord.Interaction):
         name = self.select.values[0]
@@ -185,33 +227,56 @@ class CountdownPanelView(discord.ui.View):
             )
             return
 
-        options = [
-            discord.SelectOption(
-                label=f"{cd['name']} -- {cd['label']}",
-                value=cd["name"],
-            )
-            for cd in all_countdowns[:25]
-        ]
-        view = DeleteCountdownView(self.bot, options)
+        view = DeleteCountdownView(self.bot, all_countdowns)
         await interaction.response.edit_message(
             content="Select a countdown to delete:",
             embed=None,
             view=view,
         )
 
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._sync_page()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._sync_page()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
 
 class DeleteCountdownView(discord.ui.View):
     """Ephemeral select menu for deleting a countdown."""
 
-    def __init__(self, bot: commands.Bot, options: list[discord.SelectOption]):
+    def __init__(self, bot: commands.Bot, countdowns: list, page: int = 0):
         super().__init__(timeout=60)
         self.bot = bot
+        self.countdowns = countdowns
+        self.page = page
         self.select = discord.ui.Select(
             placeholder="Select countdown to delete...",
-            options=options,
+            options=[],
         )
         self.select.callback = self.on_select
         self.add_item(self.select)
+        self._sync_page()
+
+    def _sync_page(self) -> None:
+        start = self.page * MAX_SELECT_OPTIONS
+        end = start + MAX_SELECT_OPTIONS
+        page_count = max(1, (len(self.countdowns) + MAX_SELECT_OPTIONS - 1) // MAX_SELECT_OPTIONS)
+        self.select.options = [
+            discord.SelectOption(
+                label=f"{cd['name']} -- {cd['label']}",
+                value=cd["name"],
+            )
+            for cd in self.countdowns[start:end]
+        ]
+        self.select.placeholder = f"Select countdown to delete... ({start + 1}-{min(end, len(self.countdowns))} of {len(self.countdowns)})"
+        self.prev_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= page_count - 1
 
     async def on_select(self, interaction: discord.Interaction):
         name = self.select.values[0]
@@ -224,6 +289,18 @@ class DeleteCountdownView(discord.ui.View):
             await interaction.response.edit_message(
                 content=f"Countdown `{name}` no longer exists.", view=None,
             )
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._sync_page()
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._sync_page()
+        await interaction.response.edit_message(view=self)
 
 
 # -- Commands -----------------------------------------------------------------
@@ -273,21 +350,7 @@ async def setup(bot: commands.Bot):
             )
             return
 
-        # Build panel embed summarising active countdowns
-        embed = discord.Embed(
-            title="\N{STOPWATCH} Countdowns",
-            color=discord.Color.blue(),
-        )
-        if all_countdowns:
-            lines = [
-                f"**{cd['label']}** -- <t:{cd['timestamp']}:R>"
-                for cd in all_countdowns
-            ]
-            embed.description = "\n".join(lines)
-        else:
-            embed.description = "No countdowns configured yet."
-
         view = CountdownPanelView(bot, all_countdowns, admin)
         await interaction.response.send_message(
-            embed=embed, view=view, ephemeral=True,
+            embed=view.build_embed(), view=view, ephemeral=True,
         )

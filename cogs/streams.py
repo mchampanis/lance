@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime, timezone
 
 import discord
@@ -45,6 +46,13 @@ class Streams(commands.Cog):
         except discord.HTTPException:
             log.warning("Could not create invite for %s", channel.name)
             return None
+
+    async def _delete_later(self, message: discord.Message, delay_seconds: int = 300) -> None:
+        await asyncio.sleep(delay_seconds)
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
 
     # -- events ---------------------------------------------------------------
 
@@ -142,11 +150,13 @@ class Streams(commands.Cog):
 
         try:
             await msg.edit(content="", embed=embed)
+            asyncio.create_task(self._delete_later(msg))
         except discord.HTTPException:
             # Original message may have been deleted; post a new one
             channel = self._get_announce_channel(guild)
             if channel:
-                await channel.send(embed=embed)
+                new_msg = await channel.send(embed=embed)
+                asyncio.create_task(self._delete_later(new_msg))
 
         log.info("Stream ended: %s (#%s)", member, guild.name)
 

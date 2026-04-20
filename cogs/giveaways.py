@@ -279,6 +279,16 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
+def _page_count(total_items: int) -> int:
+    return max(1, (total_items + MAX_SELECT_OPTIONS - 1) // MAX_SELECT_OPTIONS)
+
+
+def _page_bounds(page: int, total_items: int) -> tuple[int, int]:
+    start = page * MAX_SELECT_OPTIONS
+    end = min(start + MAX_SELECT_OPTIONS, total_items)
+    return start, end
+
+
 # -- Modals -------------------------------------------------------------------
 
 
@@ -386,20 +396,7 @@ class ClaimButton(
             )
             return
 
-        options = []
-        for item in items[:MAX_SELECT_OPTIONS]:
-
-            member = interaction.guild.get_member(item["user_id"])
-            who = member.display_name if member else "Unknown"
-            options.append(
-                discord.SelectOption(
-                    label=f"{item['item_name']}",
-                    description=f"From {who} ({_age(item['created_at'])})",
-                    value=str(item["id"]),
-                )
-            )
-
-        view = ClaimSelectView(cog, options)
+        view = ClaimSelectView(cog, interaction.guild, items)
         await interaction.response.send_message(
             "Select an item to claim:", view=view, ephemeral=True,
         )
@@ -435,44 +432,8 @@ class MyItemsButton(
             )
             return
 
-        embed = discord.Embed(
-            title="Your giveaway listings",
-            color=discord.Color.blurple(),
-        )
-        lines = []
-        for item in items:
-
-            line = f"**#{item['id']}** {item['item_name']} ({_age(item['created_at'])})"
-
-            pending = await db.get_pending_claims_for_item(cog.bot.db, item["id"])
-            if pending:
-                for i, claim in enumerate(pending, 1):
-                    claimer = interaction.guild.get_member(claim["claimer_id"])
-                    name = claimer.display_name if claimer else f"User {claim['claimer_id']}"
-                    line += f"\n> #{i} in queue: {name}"
-
-            accepted = await db.get_accepted_claims_for_item(cog.bot.db, item["id"])
-            for claim in accepted:
-                claimer = interaction.guild.get_member(claim["claimer_id"])
-                name = claimer.display_name if claimer else f"User {claim['claimer_id']}"
-                line += f"\n> Promised to {name}"
-
-            lines.append(line)
-
-        embed.description = "\n\n".join(lines)
-
-        # Build management options
-        options = []
-        for item in items[:MAX_SELECT_OPTIONS]:
-
-            options.append(
-                discord.SelectOption(
-                    label=f"#{item['id']} {item['item_name']}",
-                    value=str(item["id"]),
-                )
-            )
-
-        view = ManageSelectView(cog, options)
+        view = ManageSelectView(cog, interaction.guild, items)
+        embed = await view.build_embed()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
@@ -507,15 +468,40 @@ class MyClaimsButton(
             )
             return
 
-        # Build display and select options (capped at Discord's 25-option limit)
-        options = []
+        view = CancelClaimSelectView(cog, interaction.guild, claims)
+        embed = await view.build_embed()
+        await interaction.response.send_message(
+            embed=embed, view=view, ephemeral=True,
+        )
+
+
+# -- Ephemeral views (not persistent, timeout OK) ----------------------------
+
+
+class CancelClaimSelectView(discord.ui.View):
+    def __init__(self, cog: "Giveaways", guild: discord.Guild, claims: list, page: int = 0):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild = guild
+        self.claims = claims
+        self.page = page
+        self.select = discord.ui.Select(
+            placeholder="Select a claim to cancel...",
+            options=[],
+        )
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+        self._sync_page()
+
+    async def build_embed(self) -> discord.Embed:
+        start, end = _page_bounds(self.page, len(self.claims))
         lines = []
-        for claim in claims[:MAX_SELECT_OPTIONS]:
-            item = await db.get_item(cog.bot.db, claim["item_id"])
+        options = []
+        for claim in self.claims[start:end]:
+            item = await db.get_item(self.cog.bot.db, claim["item_id"])
             if item is None:
                 continue
-            # Position in queue for this item
-            pending = await db.get_pending_claims_for_item(cog.bot.db, item["id"])
+            pending = await db.get_pending_claims_for_item(self.cog.bot.db, item["id"])
             position = next(
                 (i + 1 for i, p in enumerate(pending) if p["id"] == claim["id"]),
                 None,
@@ -529,43 +515,38 @@ class MyClaimsButton(
                     value=str(claim["id"]),
                 )
             )
-        if len(claims) > MAX_SELECT_OPTIONS:
-            lines.append(f"-# ...and {len(claims) - MAX_SELECT_OPTIONS} more not shown")
 
-        if not options:
-            await interaction.response.send_message(
-                "You have no pending claims.", ephemeral=True,
-            )
-            return
-
+        self.select.options = options
         embed = discord.Embed(
             title="Your pending claims",
             description="\n".join(lines),
             color=discord.Color.blurple(),
         )
-        view = CancelClaimSelectView(cog, options)
-        await interaction.response.send_message(
-            embed=embed, view=view, ephemeral=True,
-        )
+        if _page_count(len(self.claims)) > 1:
+            embed.set_footer(text=f"Page {self.page + 1}/{_page_count(len(self.claims))}")
+        return embed
 
-
-# -- Ephemeral views (not persistent, timeout OK) ----------------------------
-
-
-class CancelClaimSelectView(discord.ui.View):
-    def __init__(self, cog: "Giveaways", options: list[discord.SelectOption]):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.select = discord.ui.Select(
-            placeholder="Select a claim to cancel...",
-            options=options,
-        )
-        self.select.callback = self.on_select
-        self.add_item(self.select)
+    def _sync_page(self) -> None:
+        start, end = _page_bounds(self.page, len(self.claims))
+        self.select.placeholder = f"Select a claim to cancel... ({start + 1}-{end} of {len(self.claims)})"
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= _page_count(len(self.claims)) - 1
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _dismiss_ephemeral(interaction)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._sync_page()
+        await interaction.response.edit_message(embed=await self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._sync_page()
+        await interaction.response.edit_message(embed=await self.build_embed(), view=self)
 
     async def on_select(self, interaction: discord.Interaction):
         claim_id = int(self.select.values[0])
@@ -636,19 +617,53 @@ class ConfirmCancelClaimView(discord.ui.View):
 
 
 class ClaimSelectView(discord.ui.View):
-    def __init__(self, cog: "Giveaways", options: list[discord.SelectOption]):
+    def __init__(self, cog: "Giveaways", guild: discord.Guild, items: list, page: int = 0):
         super().__init__(timeout=120)
         self.cog = cog
+        self.guild = guild
+        self.items = items
+        self.page = page
         self.select = discord.ui.Select(
             placeholder="Choose an item...",
-            options=options,
+            options=[],
         )
         self.select.callback = self.on_select
         self.add_item(self.select)
+        self._sync_page()
+
+    def _sync_page(self) -> None:
+        start, end = _page_bounds(self.page, len(self.items))
+        self.select.options = [
+            discord.SelectOption(
+                label=item["item_name"],
+                description=(
+                    f"From "
+                    f"{(self.guild.get_member(item['user_id']).display_name if self.guild.get_member(item['user_id']) else 'Unknown')} "
+                    f"({_age(item['created_at'])})"
+                ),
+                value=str(item["id"]),
+            )
+            for item in self.items[start:end]
+        ]
+        self.select.placeholder = f"Choose an item... ({start + 1}-{end} of {len(self.items)})"
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= _page_count(len(self.items)) - 1
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _dismiss_ephemeral(interaction)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._sync_page()
+        await interaction.response.edit_message(content="Select an item to claim:", view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._sync_page()
+        await interaction.response.edit_message(content="Select an item to claim:", view=self)
 
     async def on_select(self, interaction: discord.Interaction):
         item_id = int(self.select.values[0])
@@ -791,10 +806,11 @@ class DismissDMButton(
         return cls()
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         try:
             await interaction.message.delete()
         except discord.HTTPException:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="Could not delete the message.", view=None,
             )
 
@@ -1119,19 +1135,78 @@ class ConfirmReceivedButton(
 
 
 class ManageSelectView(discord.ui.View):
-    def __init__(self, cog: "Giveaways", options: list[discord.SelectOption]):
+    def __init__(self, cog: "Giveaways", guild: discord.Guild, items: list, page: int = 0):
         super().__init__(timeout=120)
         self.cog = cog
+        self.guild = guild
+        self.items = items
+        self.page = page
         self.select = discord.ui.Select(
             placeholder="Remove item...",
-            options=options,
+            options=[],
         )
         self.select.callback = self.on_select
         self.add_item(self.select)
+        self._sync_page()
+
+    async def build_embed(self) -> discord.Embed:
+        start, end = _page_bounds(self.page, len(self.items))
+        lines = []
+        for item in self.items[start:end]:
+            line = f"**#{item['id']}** {item['item_name']} ({_age(item['created_at'])})"
+
+            pending = await db.get_pending_claims_for_item(self.cog.bot.db, item["id"])
+            if pending:
+                for i, claim in enumerate(pending, 1):
+                    claimer = self.guild.get_member(claim["claimer_id"])
+                    name = claimer.display_name if claimer else f"User {claim['claimer_id']}"
+                    line += f"\n> #{i} in queue: {name}"
+
+            accepted = await db.get_accepted_claims_for_item(self.cog.bot.db, item["id"])
+            for claim in accepted:
+                claimer = self.guild.get_member(claim["claimer_id"])
+                name = claimer.display_name if claimer else f"User {claim['claimer_id']}"
+                line += f"\n> Promised to {name}"
+
+            lines.append(line)
+
+        embed = discord.Embed(
+            title="Your giveaway listings",
+            description="\n\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        if _page_count(len(self.items)) > 1:
+            embed.set_footer(text=f"Page {self.page + 1}/{_page_count(len(self.items))}")
+        return embed
+
+    def _sync_page(self) -> None:
+        start, end = _page_bounds(self.page, len(self.items))
+        self.select.options = [
+            discord.SelectOption(
+                label=f"#{item['id']} {item['item_name']}",
+                value=str(item["id"]),
+            )
+            for item in self.items[start:end]
+        ]
+        self.select.placeholder = f"Remove item... ({start + 1}-{end} of {len(self.items)})"
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= _page_count(len(self.items)) - 1
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _dismiss_ephemeral(interaction)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._sync_page()
+        await interaction.response.edit_message(embed=await self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._sync_page()
+        await interaction.response.edit_message(embed=await self.build_embed(), view=self)
 
     async def on_select(self, interaction: discord.Interaction):
         item_id = int(self.select.values[0])
