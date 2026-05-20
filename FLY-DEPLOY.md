@@ -70,7 +70,7 @@ fly secrets set HEALTHCHECK_URL="https://hc-ping.com/your-uuid"
 ## Logs
 
 ```bash
-fly logs                  # Stream live logs
+fly logs              # Stream live logs
 fly logs --app lance  # Explicit app name
 ```
 

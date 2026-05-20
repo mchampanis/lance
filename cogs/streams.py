@@ -47,7 +47,7 @@ class Streams(commands.Cog):
             log.warning("Could not create invite for %s", channel.name)
             return None
 
-    async def _delete_later(self, message: discord.Message, delay_seconds: int = 300) -> None:
+    async def _delete_later(self, message: discord.Message, delay_seconds: int = 180) -> None:
         await asyncio.sleep(delay_seconds)
         try:
             await message.delete()
